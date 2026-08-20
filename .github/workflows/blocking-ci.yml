@@ -8,13 +8,7 @@ on:
     branches: [main]
 
 jobs:
-  # Keep reusable workflow calls alphabetized. The `required` job below is the
-  # version-controlled list that the main-branch ruleset should require.
-  bazel:
-    name: Bazel
-    uses: ./.github/workflows/bazel.yml
-    secrets: inherit
-
+  # These checks use ordinary GitHub-hosted runners upstream and are portable.
   blob-size-policy:
     name: Blob size policy
     uses: ./.github/workflows/blob-size-policy.yml
@@ -35,38 +29,93 @@ jobs:
     uses: ./.github/workflows/repo-checks.yml
     secrets: inherit
 
+  # Preserve the upstream workflow graph verbatim for repositories that opt in
+  # to OpenAI-style larger/self-hosted runners. Public forks default to the
+  # standard GitHub-hosted compatibility workflow below.
+  bazel:
+    if: ${{ vars.CODEX_CI_RUNNER_PROFILE == 'upstream' }}
+    name: Bazel
+    uses: ./.github/workflows/bazel.yml
+    secrets: inherit
+
   rust-ci:
+    if: ${{ vars.CODEX_CI_RUNNER_PROFILE == 'upstream' }}
     name: rust-ci
     uses: ./.github/workflows/rust-ci.yml
     secrets: inherit
 
   sdk:
+    if: ${{ vars.CODEX_CI_RUNNER_PROFILE == 'upstream' }}
     name: sdk
     uses: ./.github/workflows/sdk.yml
     secrets: inherit
 
+  public-ci:
+    if: ${{ vars.CODEX_CI_RUNNER_PROFILE != 'upstream' }}
+    name: public-ci
+    uses: ./.github/workflows/public-ci.yml
+    secrets: inherit
+
   required:
     name: CI required
-    # Without `always()`, GitHub skips this job after a failed dependency and a
-    # required check can appear successful instead of reporting the failure.
     if: ${{ always() }}
     needs:
       - bazel
       - blob-size-policy
       - cargo-deny
       - codespell
+      - public-ci
       - repo-checks
       - rust-ci
       - sdk
     runs-on: ubuntu-24.04
     steps:
-      # Keep the helper on the same combined revision as the child workflows so
-      # the merge gate evaluates the exact candidate they validated.
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Require successful dependencies
+      - name: Require successful dependencies for selected runner profile
+        shell: bash
         env:
-          NEEDS: ${{ toJSON(needs) }}
-        run: python3 .github/scripts/check_ci_results.py
+          RUNNER_PROFILE: ${{ vars.CODEX_CI_RUNNER_PROFILE }}
+          BAZEL: ${{ needs.bazel.result }}
+          BLOB_SIZE_POLICY: ${{ needs.blob-size-policy.result }}
+          CARGO_DENY: ${{ needs.cargo-deny.result }}
+          CODESPELL: ${{ needs.codespell.result }}
+          PUBLIC_CI: ${{ needs.public-ci.result }}
+          REPO_CHECKS: ${{ needs.repo-checks.result }}
+          RUST_CI: ${{ needs.rust-ci.result }}
+          SDK: ${{ needs.sdk.result }}
+        run: |
+          set -euo pipefail
+
+          require_success() {
+            local name="$1"
+            local result="$2"
+            if [[ "${result}" != success ]]; then
+              echo "${name} finished with ${result}" >&2
+              exit 1
+            fi
+          }
+
+          require_skipped() {
+            local name="$1"
+            local result="$2"
+            if [[ "${result}" != skipped ]]; then
+              echo "${name} should be skipped for this runner profile; got ${result}" >&2
+              exit 1
+            fi
+          }
+
+          require_success blob-size-policy "${BLOB_SIZE_POLICY}"
+          require_success cargo-deny "${CARGO_DENY}"
+          require_success codespell "${CODESPELL}"
+          require_success repo-checks "${REPO_CHECKS}"
+
+          if [[ "${RUNNER_PROFILE}" == upstream ]]; then
+            require_success bazel "${BAZEL}"
+            require_success rust-ci "${RUST_CI}"
+            require_success sdk "${SDK}"
+            require_skipped public-ci "${PUBLIC_CI}"
+          else
+            require_success public-ci "${PUBLIC_CI}"
+            require_skipped bazel "${BAZEL}"
+            require_skipped rust-ci "${RUST_CI}"
+            require_skipped sdk "${SDK}"
+          fi

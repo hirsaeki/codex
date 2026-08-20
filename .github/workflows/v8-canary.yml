@@ -72,8 +72,12 @@ jobs:
   build:
     name: Build ${{ matrix.variant }} ${{ matrix.target }}
     needs: metadata
-    # Metadata always runs; only relevant changes pay for the large matrix.
-    if: ${{ needs.metadata.outputs.canary_required == 'true' }}
+    # Public/default direct PRs stay metadata-only. The upstream profile opts
+    # back into the existing V8 matrix; workflow_call/dispatch are unchanged.
+    if: >-
+      needs.metadata.outputs.canary_required == 'true' &&
+      (github.event_name != 'pull_request' ||
+      vars.CODEX_CI_RUNNER_PROFILE == 'upstream')
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -302,7 +306,11 @@ jobs:
   build-windows-source:
     name: Build ptrcomp-sandbox ${{ matrix.target }} from source
     needs: metadata
-    if: ${{ needs.metadata.outputs.windows_source_required == 'true' }}
+    # Match the main matrix: direct PRs require the upstream runner profile.
+    if: >-
+      needs.metadata.outputs.windows_source_required == 'true' &&
+      (github.event_name != 'pull_request' ||
+      vars.CODEX_CI_RUNNER_PROFILE == 'upstream')
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
