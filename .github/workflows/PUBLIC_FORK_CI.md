@@ -26,7 +26,7 @@ base repository configuration.
 
 | Dependency | Upstream usage | Public behavior |
 | --- | --- | --- |
-| Runner group `${repository}-runners` with `${repository}-linux-x64`, `-linux-arm64`, `-windows-x64`, and `-windows-arm64` labels | Bazel Windows jobs, Rust CI Windows jobs, SDK jobs, full Cargo/nextest matrix | Replaced by standard `ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-latest`, and `windows-11-arm` jobs in `public-ci.yml` |
+| Runner group `${repository}-runners` with `${repository}-linux-x64`, `-linux-arm64`, `-windows-x64`, and `-windows-arm64` labels | Bazel Windows jobs, Rust CI Windows jobs, SDK jobs, full Cargo/nextest matrix | Replaced by representative jobs on standard `ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-latest`, and `windows-11-arm` runners in `public-ci.yml` |
 | `macos-15-xlarge` | Bazel, Rust CI/full CI, and V8 canary | Replaced by standard arm64 `macos-15` where public cross-platform signal is needed; direct PR V8 canary jobs are skipped in the public profile |
 | `environment: bazel` | Bazel-backed upstream jobs | Not required by the public compatibility workflow; retained unchanged in upstream workflows |
 | `BUILDBUDDY_API_KEY` | Remote cache/execution and the OpenAI BuildBuddy tenant | Optional. Existing Bazel wrappers already remove remote-execution CI configs and use local Bazel when the secret is absent. Trusted-upstream checks prevent a fork PR from selecting the OpenAI tenant. |
@@ -34,18 +34,24 @@ base repository configuration.
 
 ## Coverage trade-off
 
-The public profile keeps the portable policy checks, runs the upstream fast Rust
-checks, argument-comment lint on Linux/macOS/Windows, full Bazel tests on the two
-Linux x64 targets, cross-platform Cargo checks on standard macOS/Windows, and SDK
-build/lint/tests that do not require an upstream runner. Postmerge additionally
-adds standard GitHub-hosted Linux ARM64 and Windows ARM64 smoke checks.
+The public profile keeps the portable policy checks and upstream fast Rust
+checks, while using representative Bazel-backed smoke coverage that fits the
+standard public runner pool. It runs argument-comment lint once on Windows,
+where the upstream helper lints the compatible Rust library/binary/proc-macro
+graph, plus a Linux GNU Bazel unit-test smoke target. Cross-platform Cargo checks
+still run on standard macOS/Windows runners, and SDK build/lint/tests that do not
+require an upstream runner remain enabled. Postmerge additionally adds standard
+GitHub-hosted Linux ARM64 and Windows ARM64 smoke checks.
 
-It intentionally does not try to reproduce OpenAI's RBE-backed Windows Bazel
-shards, larger-runner capacity, full nextest sharding, or V8 canary matrix on
-smaller public runners. Direct PR V8 canary runs keep the cheap metadata/change
-detection job but gate the expensive build jobs on `CODEX_CI_RUNNER_PROFILE=upstream`.
-Those jobs remain available without modification to their matrix by opting into
-the `upstream` profile.
+The public profile deliberately does not run full `//...` Bazel test matrices or
+repeat the argument-comment lint graph on every desktop OS. Those workloads are
+sized for upstream remote execution/larger runners and can exceed practical
+limits on standard hosted runners. It also does not try to reproduce OpenAI's
+RBE-backed Windows Bazel sharding, larger-runner capacity, full nextest sharding,
+or V8 canary matrix on smaller public runners. Direct PR V8 canary runs keep the
+cheap metadata/change detection job but gate the expensive build jobs on
+`CODEX_CI_RUNNER_PROFILE=upstream`. The full upstream jobs remain available
+without modification by opting into the `upstream` profile.
 
 ## Upstream maintenance
 
