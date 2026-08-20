@@ -14,6 +14,7 @@ use crate::protocol::FS_CANONICALIZE_METHOD;
 use crate::protocol::FS_COPY_METHOD;
 use crate::protocol::FS_CREATE_DIRECTORY_METHOD;
 use crate::protocol::FS_GET_METADATA_METHOD;
+use crate::protocol::FS_MUTATE_BATCH_METHOD;
 use crate::protocol::FS_OPEN_METHOD;
 use crate::protocol::FS_READ_DIRECTORY_METHOD;
 use crate::protocol::FS_READ_FILE_METHOD;
@@ -28,6 +29,8 @@ use crate::protocol::FsCreateDirectoryParams;
 use crate::protocol::FsCreateDirectoryResponse;
 use crate::protocol::FsGetMetadataParams;
 use crate::protocol::FsGetMetadataResponse;
+use crate::protocol::FsMutateBatchParams;
+use crate::protocol::FsMutateBatchResponse;
 use crate::protocol::FsReadDirectoryEntry;
 use crate::protocol::FsReadDirectoryParams;
 use crate::protocol::FsReadDirectoryResponse;
@@ -68,6 +71,8 @@ pub(crate) enum FsHelperRequest {
     Remove(FsRemoveParams),
     #[serde(rename = "fs/copy")]
     Copy(FsCopyParams),
+    #[serde(rename = "fs/mutateBatch")]
+    MutateBatch(FsMutateBatchParams),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,6 +116,8 @@ pub(crate) enum FsHelperPayload {
     Remove(FsRemoveResponse),
     #[serde(rename = "fs/copy")]
     Copy(FsCopyResponse),
+    #[serde(rename = "fs/mutateBatch")]
+    MutateBatch(FsMutateBatchResponse),
 }
 
 impl FsHelperPayload {
@@ -126,6 +133,7 @@ impl FsHelperPayload {
             Self::Walk(_) => FS_WALK_METHOD,
             Self::Remove(_) => FS_REMOVE_METHOD,
             Self::Copy(_) => FS_COPY_METHOD,
+            Self::MutateBatch(_) => FS_MUTATE_BATCH_METHOD,
         }
     }
 
@@ -205,6 +213,16 @@ impl FsHelperPayload {
         match self {
             Self::Copy(response) => Ok(response),
             other => Err(unexpected_response(FS_COPY_METHOD, other.operation())),
+        }
+    }
+
+    pub(crate) fn expect_mutate_batch(self) -> Result<FsMutateBatchResponse, JSONRPCErrorError> {
+        match self {
+            Self::MutateBatch(response) => Ok(response),
+            other => Err(unexpected_response(
+                FS_MUTATE_BATCH_METHOD,
+                other.operation(),
+            )),
         }
     }
 }
@@ -333,6 +351,9 @@ pub(crate) async fn run_direct_request(
                 .map_err(map_fs_error)?;
             Ok(FsHelperPayload::Copy(FsCopyResponse {}))
         }
+        FsHelperRequest::MutateBatch(params) => crate::server::mutate_batch(&file_system, params)
+            .await
+            .map(FsHelperPayload::MutateBatch),
     }
 }
 

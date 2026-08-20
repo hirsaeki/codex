@@ -10,6 +10,10 @@ use crate::CopyOptions;
 use crate::CreateDirectoryOptions;
 use crate::ExecServerRuntimePaths;
 use crate::ExecutorFileSystem;
+use crate::FileMutation;
+use crate::FileMutationBatch;
+use crate::FileMutationBatchOutcome;
+use crate::FilePreimage;
 use crate::RemoveOptions;
 use crate::file_read::FileReadHandleManager;
 use crate::local_file_system::LocalFileSystem;
@@ -23,8 +27,13 @@ use crate::protocol::FsCopyParams;
 use crate::protocol::FsCopyResponse;
 use crate::protocol::FsCreateDirectoryParams;
 use crate::protocol::FsCreateDirectoryResponse;
+use crate::protocol::FsFilePreimage;
 use crate::protocol::FsGetMetadataParams;
 use crate::protocol::FsGetMetadataResponse;
+use crate::protocol::FsMutateBatchParams;
+use crate::protocol::FsMutateBatchResponse;
+use crate::protocol::FsMutation;
+use crate::protocol::FsMutationBatchOutcome;
 use crate::protocol::FsOpenParams;
 use crate::protocol::FsOpenResponse;
 use crate::protocol::FsReadBlockParams;
@@ -40,6 +49,8 @@ use crate::protocol::FsWalkParams;
 use crate::protocol::FsWalkResponse;
 use crate::protocol::FsWriteFileParams;
 use crate::protocol::FsWriteFileResponse;
+use crate::protocol::MAX_FS_MUTATE_BATCH_DECODED_BYTES;
+use crate::protocol::MAX_FS_MUTATE_BATCH_OPERATIONS;
 use crate::rpc::internal_error;
 use crate::rpc::invalid_request;
 use crate::rpc::not_found;
@@ -287,6 +298,91 @@ impl FileSystemHandler {
             .map_err(map_fs_error)?;
         Ok(FsCopyResponse {})
     }
+
+    pub(crate) async fn mutate_batch(
+        &self,
+        params: FsMutateBatchParams,
+    ) -> Result<FsMutateBatchResponse, JSONRPCErrorError> {
+        mutate_batch(&self.file_system, params).await
+    }
+}
+
+pub(crate) async fn mutate_batch(
+    file_system: &dyn ExecutorFileSystem,
+    params: FsMutateBatchParams,
+) -> Result<FsMutateBatchResponse, JSONRPCErrorError> {
+    if params.mutations.len() > MAX_FS_MUTATE_BATCH_OPERATIONS {
+        return Err(invalid_request(format!(
+            "filesystem mutation batch has {} operations; limit is {MAX_FS_MUTATE_BATCH_OPERATIONS}",
+            params.mutations.len()
+        )));
+    }
+    let decoded_bytes = params.mutations.iter().try_fold(0usize, |total, mutation| {
+        let bytes = match mutation {
+            FsMutation::Write {
+                expected, contents, ..
+            } => {
+                contents.0.len()
+                    + match expected {
+                        FsFilePreimage::Missing => 0,
+                        FsFilePreimage::Exact(contents) => contents.0.len(),
+                    }
+            }
+            FsMutation::Remove { expected, .. } => expected.0.len(),
+        };
+        total.checked_add(bytes)
+    });
+    if decoded_bytes.is_none_or(|bytes| bytes > MAX_FS_MUTATE_BATCH_DECODED_BYTES) {
+        return Err(invalid_request(format!(
+            "filesystem mutation batch decoded bytes exceed limit {MAX_FS_MUTATE_BATCH_DECODED_BYTES}"
+        )));
+    }
+    let batch = FileMutationBatch {
+        mutations: params
+            .mutations
+            .into_iter()
+            .map(|mutation| match mutation {
+                FsMutation::Write {
+                    path,
+                    expected,
+                    contents,
+                } => FileMutation::Write {
+                    path,
+                    expected: match expected {
+                        FsFilePreimage::Missing => FilePreimage::Missing,
+                        FsFilePreimage::Exact(contents) => FilePreimage::Exact(contents.0),
+                    },
+                    contents: contents.0,
+                },
+                FsMutation::Remove { path, expected } => FileMutation::Remove {
+                    path,
+                    expected: expected.0,
+                },
+            })
+            .collect(),
+    };
+    let outcome = file_system
+        .mutate_batch(batch, params.sandbox.as_ref())
+        .await
+        .map_err(map_fs_error)?;
+    Ok(FsMutateBatchResponse {
+        outcome: match outcome {
+            FileMutationBatchOutcome::Committed => FsMutationBatchOutcome::Committed,
+            FileMutationBatchOutcome::Rejected { error } => {
+                FsMutationBatchOutcome::Rejected { error }
+            }
+            FileMutationBatchOutcome::RolledBack { error } => {
+                FsMutationBatchOutcome::RolledBack { error }
+            }
+            FileMutationBatchOutcome::Indeterminate {
+                error,
+                possibly_mutated_paths,
+            } => FsMutationBatchOutcome::Indeterminate {
+                error,
+                possibly_mutated_paths,
+            },
+        },
+    })
 }
 
 fn validate_file_read_handle_id(handle_id: &str) -> Result<(), JSONRPCErrorError> {
@@ -320,6 +416,7 @@ mod tests {
 
     use super::*;
     use crate::FileSystemSandboxContext;
+    use crate::protocol::ByteChunk;
     use crate::protocol::FsReadFileParams;
     use crate::protocol::FsWriteFileParams;
 
@@ -443,5 +540,53 @@ mod tests {
 
             assert_eq!(response.data_base64, STANDARD.encode("ok"));
         }
+    }
+
+    #[tokio::test]
+    async fn mutation_batch_rejects_operation_limit_before_filesystem_access() {
+        let path = PathUri::from_host_native_path(
+            std::env::current_dir()
+                .expect("current directory")
+                .join("batch-limit.txt"),
+        )
+        .expect("path URI");
+        let params = FsMutateBatchParams {
+            mutations: (0..=MAX_FS_MUTATE_BATCH_OPERATIONS)
+                .map(|_| FsMutation::Write {
+                    path: path.clone(),
+                    expected: FsFilePreimage::Missing,
+                    contents: ByteChunk(Vec::new()),
+                })
+                .collect(),
+            sandbox: None,
+        };
+
+        let error = mutate_batch(&LocalFileSystem::unsandboxed(), params)
+            .await
+            .expect_err("operation limit should reject the request");
+        assert_eq!(error.code, -32600);
+    }
+
+    #[tokio::test]
+    async fn mutation_batch_rejects_decoded_byte_limit_before_filesystem_access() {
+        let path = PathUri::from_host_native_path(
+            std::env::current_dir()
+                .expect("current directory")
+                .join("batch-bytes.txt"),
+        )
+        .expect("path URI");
+        let params = FsMutateBatchParams {
+            mutations: vec![FsMutation::Write {
+                path,
+                expected: FsFilePreimage::Missing,
+                contents: ByteChunk(vec![0; MAX_FS_MUTATE_BATCH_DECODED_BYTES + 1]),
+            }],
+            sandbox: None,
+        };
+
+        let error = mutate_batch(&LocalFileSystem::unsandboxed(), params)
+            .await
+            .expect_err("decoded byte limit should reject the request");
+        assert_eq!(error.code, -32600);
     }
 }

@@ -173,10 +173,8 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
         let sandbox = Self::file_system_sandbox_context_for_attempt(req, attempt);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let result = codex_apply_patch::apply_patch_with_mode(
-            &req.action.patch,
-            req.action.update_file_mode(),
-            &req.action.cwd,
+        let result = codex_apply_patch::apply_patch_action(
+            &req.action,
             &mut stdout,
             &mut stderr,
             fs.as_ref(),
@@ -186,6 +184,9 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
         let stdout = String::from_utf8_lossy(&stdout).into_owned();
         let stderr = String::from_utf8_lossy(&stderr).into_owned();
         let failed = result.is_err();
+        let indeterminate = result
+            .as_ref()
+            .is_err_and(|failure| failure.is_indeterminate());
         let exit_code = if failed { 1 } else { 0 };
         let delta = match result {
             Ok(delta) => delta,
@@ -201,6 +202,7 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
             timed_out: false,
         };
         let sandbox_denied = failed
+            && !indeterminate
             && if attempt.sandbox == SandboxType::None {
                 attempt.sandbox_requested && is_likely_executor_managed_sandbox_denied(&output)
             } else {

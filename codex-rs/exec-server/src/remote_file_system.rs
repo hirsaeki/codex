@@ -15,6 +15,8 @@ use crate::ExecServerError;
 use crate::ExecutorFileSystem;
 use crate::ExecutorFileSystemFuture;
 use crate::FileMetadata;
+use crate::FileMutationBatch;
+use crate::FileMutationBatchOutcome;
 use crate::FileSystemReadStream;
 use crate::FileSystemResult;
 use crate::FileSystemSandboxContext;
@@ -27,6 +29,7 @@ use crate::protocol::FsCanonicalizeParams;
 use crate::protocol::FsCopyParams;
 use crate::protocol::FsCreateDirectoryParams;
 use crate::protocol::FsGetMetadataParams;
+use crate::protocol::FsMutateBatchParams;
 use crate::protocol::FsReadDirectoryParams;
 use crate::protocol::FsReadFileParams;
 use crate::protocol::FsRemoveParams;
@@ -307,9 +310,70 @@ impl RemoteFileSystem {
         result.map_err(map_remote_error)?;
         Ok(())
     }
+
+    async fn mutate_batch(
+        &self,
+        batch: FileMutationBatch,
+        sandbox: Option<&FileSystemSandboxContext>,
+    ) -> FileSystemResult<FileMutationBatchOutcome> {
+        trace!("remote fs mutate_batch");
+        let client = self.client.get().await.map_err(map_remote_error)?;
+        if !client
+            .environment_info()
+            .await
+            .map_err(map_remote_error)?
+            .capabilities
+            .file_system_batch_mutation
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "remote exec-server does not support filesystem mutation batches",
+            ));
+        }
+        let possibly_mutated_paths = batch
+            .mutations
+            .iter()
+            .map(|mutation| match mutation {
+                crate::FileMutation::Write { path, .. }
+                | crate::FileMutation::Remove { path, .. } => path.clone(),
+            })
+            .collect();
+        let result = client
+            .fs_mutate_batch(FsMutateBatchParams {
+                mutations: batch.mutations.into_iter().map(Into::into).collect(),
+                sandbox: remote_sandbox_context(sandbox),
+            })
+            .await;
+        self.metadata_requests.lock().await.clear();
+        Ok(match result {
+            Ok(response) => response.outcome.into(),
+            Err(ExecServerError::Server {
+                code: INVALID_REQUEST_ERROR_CODE,
+                message,
+            }) => FileMutationBatchOutcome::Rejected { error: message },
+            Err(ExecServerError::Server {
+                code: METHOD_NOT_FOUND_ERROR_CODE,
+                message,
+            }) => {
+                return Err(io::Error::new(io::ErrorKind::Unsupported, message));
+            }
+            Err(error) => FileMutationBatchOutcome::Indeterminate {
+                error: error.to_string(),
+                possibly_mutated_paths,
+            },
+        })
+    }
 }
 
 impl ExecutorFileSystem for RemoteFileSystem {
+    fn mutate_batch<'a>(
+        &'a self,
+        batch: FileMutationBatch,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, FileMutationBatchOutcome> {
+        Box::pin(RemoteFileSystem::mutate_batch(self, batch, sandbox))
+    }
+
     fn canonicalize<'a>(
         &'a self,
         path: &'a PathUri,

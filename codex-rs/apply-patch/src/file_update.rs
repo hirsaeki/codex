@@ -39,6 +39,15 @@ pub(crate) async fn derive_new_contents_from_chunks(
         })
     })?;
 
+    derive_new_contents_from_contents(path, original_contents, chunks, update_file_mode)
+}
+
+pub(crate) fn derive_new_contents_from_contents(
+    path: &PathUri,
+    original_contents: String,
+    chunks: &[UpdateFileChunk],
+    update_file_mode: ApplyPatchFileUpdateMode,
+) -> std::result::Result<AppliedPatch, ApplyPatchError> {
     let path_text = path.inferred_native_path_string();
     let new_contents = match update_file_mode {
         ApplyPatchFileUpdateMode::NormalizeToLf => {
@@ -73,6 +82,27 @@ pub(crate) async fn derive_new_contents_from_chunks(
     Ok(AppliedPatch {
         original_contents,
         new_contents,
+    })
+}
+
+pub(crate) fn file_update_from_contents(
+    path: &PathUri,
+    original_contents: String,
+    chunks: &[UpdateFileChunk],
+    update_file_mode: ApplyPatchFileUpdateMode,
+) -> std::result::Result<ApplyPatchFileUpdate, ApplyPatchError> {
+    let AppliedPatch {
+        original_contents,
+        new_contents,
+    } = derive_new_contents_from_contents(path, original_contents, chunks, update_file_mode)?;
+    let unified_diff = TextDiff::from_lines(&original_contents, &new_contents)
+        .unified_diff()
+        .context_radius(1)
+        .to_string();
+    Ok(ApplyPatchFileUpdate {
+        unified_diff,
+        original_content: original_contents,
+        content: new_contents,
     })
 }
 

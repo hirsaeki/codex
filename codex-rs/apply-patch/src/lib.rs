@@ -1,6 +1,7 @@
 mod file_update;
 mod invocation;
 mod parser;
+mod prepared;
 mod seek_sequence;
 mod standalone_executable;
 mod streaming_parser;
@@ -14,6 +15,7 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
+use codex_exec_server::FileMutationBatchOutcome;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_exec_server::RemoveOptions;
 use codex_utils_path_uri::PathUri;
@@ -31,13 +33,13 @@ pub use file_update::ApplyPatchFileUpdate;
 use file_update::derive_new_contents_from_chunks;
 pub use file_update::unified_diff_from_chunks;
 pub use file_update::unified_diff_from_chunks_with_context;
-pub(crate) use file_update::unified_diff_from_chunks_with_mode;
 pub use invocation::MaybeApplyPatch;
 pub use invocation::maybe_parse_apply_patch;
 pub use invocation::maybe_parse_apply_patch_verified;
 pub use invocation::maybe_parse_apply_patch_verified_with_mode;
 pub use invocation::verify_apply_patch_args;
 pub use invocation::verify_apply_patch_args_with_mode;
+use prepared::PreparedPatch;
 pub use standalone_executable::main;
 
 use crate::invocation::ExtractHeredocError;
@@ -87,6 +89,10 @@ pub enum ApplyPatchError {
     /// A patch path could not be resolved as a path URI.
     #[error(transparent)]
     PathUri(#[from] PathUriParseError),
+    #[error("apply_patch batch failed: {0}")]
+    BatchMutation(String),
+    #[error("apply_patch transaction outcome is indeterminate: {0}")]
+    Indeterminate(String),
     /// A raw patch body was provided without an explicit `apply_patch` invocation.
     #[error(
         "patch detected without explicit call to apply_patch. Rerun as [\"apply_patch\", \"<patch>\"]"
@@ -175,6 +181,10 @@ pub struct ApplyPatchAction {
 
     update_file_mode: ApplyPatchFileUpdateMode,
 
+    hunks: Vec<Hunk>,
+
+    prepared: PreparedPatch,
+
     /// The raw patch argument that can be used to apply the patch. i.e., if the
     /// original arg was parsed in "lenient" mode with a
     /// heredoc, this should be the value without the heredoc wrapper.
@@ -211,12 +221,46 @@ impl ApplyPatchAction {
 + {content}
 *** End Patch"#,
         );
-        let changes = HashMap::from([(path.clone(), ApplyPatchFileChange::Add { content })]);
+        let changes = HashMap::from([(
+            path.clone(),
+            ApplyPatchFileChange::Add {
+                content: content.clone(),
+            },
+        )]);
+        let path_buf = PathBuf::from(filename);
         #[expect(clippy::expect_used)]
+        let cwd = path.parent().expect("path should have parent");
         Self {
             changes,
             update_file_mode: ApplyPatchFileUpdateMode::default(),
-            cwd: path.parent().expect("path should have parent"),
+            hunks: vec![Hunk::AddFile {
+                path: path_buf.clone(),
+                contents: content.clone(),
+            }],
+            prepared: PreparedPatch {
+                batch: codex_exec_server::FileMutationBatch {
+                    mutations: vec![codex_exec_server::FileMutation::Write {
+                        path: path.clone(),
+                        expected: codex_exec_server::FilePreimage::Missing,
+                        contents: content.clone().into_bytes(),
+                    }],
+                },
+                delta: AppliedPatchDelta::new(
+                    vec![AppliedPatchChange {
+                        path: path.clone(),
+                        change: AppliedPatchFileChange::Add {
+                            content,
+                            overwritten_content: None,
+                        },
+                    }],
+                    /*exact*/ true,
+                ),
+                affected: AffectedPaths {
+                    added: vec![path_buf],
+                    ..Default::default()
+                },
+            },
+            cwd,
             patch,
         }
     }
@@ -313,6 +357,10 @@ impl ApplyPatchFailure {
     pub fn into_parts(self) -> (ApplyPatchError, AppliedPatchDelta) {
         (self.error, self.delta)
     }
+
+    pub fn is_indeterminate(&self) -> bool {
+        matches!(self.error, ApplyPatchError::Indeterminate(_))
+    }
 }
 
 /// Applies the patch and prints the result to stdout/stderr.
@@ -374,7 +422,129 @@ pub async fn apply_patch_with_mode(
         }
     };
 
-    apply_hunks_with_mode(&hunks, update_file_mode, cwd, stdout, stderr, fs, sandbox).await
+    if hunks.is_empty() {
+        return apply_hunks_with_mode(&hunks, update_file_mode, cwd, stdout, stderr, fs, sandbox)
+            .await;
+    }
+
+    let prepared = match prepared::prepare_hunks(
+        &hunks,
+        update_file_mode,
+        cwd,
+        fs,
+        sandbox,
+        prepared::RepeatedSourcePaths::Allow,
+    )
+    .await
+    {
+        Ok(prepared) => prepared.prepared,
+        Err(error) => return report_preparation_failure(error, stderr),
+    };
+    apply_prepared_or_legacy(
+        &prepared,
+        &hunks,
+        update_file_mode,
+        cwd,
+        stdout,
+        stderr,
+        fs,
+        sandbox,
+    )
+    .await
+}
+
+pub async fn apply_patch_action(
+    action: &ApplyPatchAction,
+    stdout: &mut impl std::io::Write,
+    stderr: &mut impl std::io::Write,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    apply_prepared_or_legacy(
+        &action.prepared,
+        &action.hunks,
+        action.update_file_mode,
+        &action.cwd,
+        stdout,
+        stderr,
+        fs,
+        sandbox,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_prepared_or_legacy(
+    prepared: &PreparedPatch,
+    hunks: &[Hunk],
+    update_file_mode: ApplyPatchFileUpdateMode,
+    cwd: &PathUri,
+    stdout: &mut impl std::io::Write,
+    stderr: &mut impl std::io::Write,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    let outcome = match fs.mutate_batch(prepared.batch.clone(), sandbox).await {
+        Ok(outcome) => outcome,
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+            return apply_hunks_with_mode(
+                hunks,
+                update_file_mode,
+                cwd,
+                stdout,
+                stderr,
+                fs,
+                sandbox,
+            )
+            .await;
+        }
+        Err(error) => return report_preparation_failure(error.into(), stderr),
+    };
+
+    match outcome {
+        FileMutationBatchOutcome::Committed => {
+            print_summary(&prepared.affected, stdout).map_err(|error| {
+                ApplyPatchFailure::new(ApplyPatchError::from(error), prepared.delta.clone())
+            })?;
+            Ok(prepared.delta.clone())
+        }
+        FileMutationBatchOutcome::Rejected { error }
+        | FileMutationBatchOutcome::RolledBack { error } => {
+            report_preparation_failure(ApplyPatchError::BatchMutation(error), stderr)
+        }
+        FileMutationBatchOutcome::Indeterminate {
+            error,
+            possibly_mutated_paths,
+        } => {
+            let mut delta = prepared.delta.clone();
+            delta.exact = false;
+            delta.changes.retain(|change| {
+                possibly_mutated_paths.contains(&change.path)
+                    || matches!(
+                        &change.change,
+                        AppliedPatchFileChange::Update {
+                            move_path: Some(path),
+                            ..
+                        } if possibly_mutated_paths.contains(path)
+                    )
+            });
+            let error = ApplyPatchError::Indeterminate(error);
+            writeln!(stderr, "{error}")
+                .map_err(ApplyPatchError::from)
+                .map_err(ApplyPatchFailure::without_delta)?;
+            Err(ApplyPatchFailure::new(error, delta))
+        }
+    }
+}
+
+fn report_preparation_failure<T>(
+    error: ApplyPatchError,
+    stderr: &mut impl std::io::Write,
+) -> Result<T, ApplyPatchFailure> {
+    writeln!(stderr, "{error}")
+        .map_err(ApplyPatchError::from)
+        .map_err(ApplyPatchFailure::without_delta)?;
+    Err(ApplyPatchFailure::without_delta(error))
 }
 
 /// Applies hunks and continues to update stdout/stderr
@@ -439,6 +609,7 @@ async fn apply_hunks_with_mode(
 /// Returns an error if any of the changes could not be applied.
 /// Tracks file paths affected by applying a patch, preserving the path spelling
 /// from the patch for user-facing summaries.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct AffectedPaths {
     pub added: Vec<PathBuf>,
     pub modified: Vec<PathBuf>,
@@ -783,10 +954,153 @@ pub fn print_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_exec_server::CopyOptions;
+    use codex_exec_server::ExecutorFileSystemFuture;
+    use codex_exec_server::FileMetadata;
+    use codex_exec_server::FileMutation;
+    use codex_exec_server::FileMutationBatch;
+    use codex_exec_server::FileSystemReadStream;
     use codex_exec_server::LOCAL_FS;
+    use codex_exec_server::ReadDirectoryEntry;
+    use codex_exec_server::WalkOptions;
+    use codex_exec_server::WalkOutcome;
     use pretty_assertions::assert_eq;
     use std::fs;
+    use std::path::Path;
     use tempfile::tempdir;
+
+    #[derive(Clone)]
+    struct BatchOutcomeFileSystem {
+        outcome: FileMutationBatchOutcome,
+        simulate_rolled_back_commit: bool,
+        unsupported_batch: bool,
+    }
+
+    impl ExecutorFileSystem for BatchOutcomeFileSystem {
+        fn canonicalize<'a>(
+            &'a self,
+            path: &'a PathUri,
+            sandbox: Option<&'a FileSystemSandboxContext>,
+        ) -> ExecutorFileSystemFuture<'a, PathUri> {
+            LOCAL_FS.canonicalize(path, sandbox)
+        }
+
+        fn read_file<'a>(
+            &'a self,
+            path: &'a PathUri,
+            sandbox: Option<&'a FileSystemSandboxContext>,
+        ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
+            LOCAL_FS.read_file(path, sandbox)
+        }
+
+        fn read_file_stream<'a>(
+            &'a self,
+            path: &'a PathUri,
+            sandbox: Option<&'a FileSystemSandboxContext>,
+        ) -> ExecutorFileSystemFuture<'a, FileSystemReadStream> {
+            LOCAL_FS.read_file_stream(path, sandbox)
+        }
+
+        fn write_file<'a>(
+            &'a self,
+            path: &'a PathUri,
+            contents: Vec<u8>,
+            sandbox: Option<&'a FileSystemSandboxContext>,
+        ) -> ExecutorFileSystemFuture<'a, ()> {
+            LOCAL_FS.write_file(path, contents, sandbox)
+        }
+
+        fn create_directory<'a>(
+            &'a self,
+            path: &'a PathUri,
+            options: CreateDirectoryOptions,
+            sandbox: Option<&'a FileSystemSandboxContext>,
+        ) -> ExecutorFileSystemFuture<'a, ()> {
+            LOCAL_FS.create_directory(path, options, sandbox)
+        }
+
+        fn get_metadata<'a>(
+            &'a self,
+            path: &'a PathUri,
+            sandbox: Option<&'a FileSystemSandboxContext>,
+        ) -> ExecutorFileSystemFuture<'a, FileMetadata> {
+            LOCAL_FS.get_metadata(path, sandbox)
+        }
+
+        fn read_directory<'a>(
+            &'a self,
+            path: &'a PathUri,
+            sandbox: Option<&'a FileSystemSandboxContext>,
+        ) -> ExecutorFileSystemFuture<'a, Vec<ReadDirectoryEntry>> {
+            LOCAL_FS.read_directory(path, sandbox)
+        }
+
+        fn walk<'a>(
+            &'a self,
+            path: &'a PathUri,
+            options: WalkOptions,
+            sandbox: Option<&'a FileSystemSandboxContext>,
+        ) -> ExecutorFileSystemFuture<'a, WalkOutcome> {
+            LOCAL_FS.walk(path, options, sandbox)
+        }
+
+        fn remove<'a>(
+            &'a self,
+            path: &'a PathUri,
+            options: RemoveOptions,
+            sandbox: Option<&'a FileSystemSandboxContext>,
+        ) -> ExecutorFileSystemFuture<'a, ()> {
+            LOCAL_FS.remove(path, options, sandbox)
+        }
+
+        fn copy<'a>(
+            &'a self,
+            source_path: &'a PathUri,
+            destination_path: &'a PathUri,
+            options: CopyOptions,
+            sandbox: Option<&'a FileSystemSandboxContext>,
+        ) -> ExecutorFileSystemFuture<'a, ()> {
+            LOCAL_FS.copy(source_path, destination_path, options, sandbox)
+        }
+
+        fn mutate_batch<'a>(
+            &'a self,
+            batch: FileMutationBatch,
+            _sandbox: Option<&'a FileSystemSandboxContext>,
+        ) -> ExecutorFileSystemFuture<'a, FileMutationBatchOutcome> {
+            Box::pin(async move {
+                if self.unsupported_batch {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "batch mutation is unsupported",
+                    ));
+                }
+                if self.simulate_rolled_back_commit {
+                    for mutation in batch.mutations {
+                        if let FileMutation::Write {
+                            path,
+                            expected,
+                            contents,
+                        } = mutation
+                        {
+                            let native_path = path.to_abs_path()?;
+                            fs::write(native_path.as_path(), contents)?;
+                            match expected {
+                                codex_exec_server::FilePreimage::Missing => {
+                                    fs::remove_file(native_path.as_path())?
+                                }
+                                codex_exec_server::FilePreimage::Exact(contents) => {
+                                    fs::write(native_path.as_path(), contents)?
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                Ok(self.outcome.clone())
+            })
+        }
+    }
 
     /// Helper to construct a patch with the given body.
     fn wrap_patch(body: &str) -> String {
@@ -1010,7 +1324,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_failed_move_returns_committed_destination_delta() {
+    async fn test_failed_move_leaves_source_and_destination_unchanged() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempdir().unwrap();
@@ -1044,23 +1358,11 @@ mod tests {
         assert!(
             String::from_utf8(stderr)
                 .unwrap()
-                .contains(&format!("Failed to remove original {}", src.display()))
+                .contains("apply_patch batch failed")
         );
-        assert_eq!(
-            failure.delta(),
-            &AppliedPatchDelta::new(
-                vec![AppliedPatchChange {
-                    path: PathUri::from_host_native_path(&dest).expect("absolute destination path"),
-                    change: AppliedPatchFileChange::Add {
-                        content: "line2\n".to_string(),
-                        overwritten_content: None,
-                    },
-                }],
-                /*exact*/ true,
-            )
-        );
+        assert_eq!(failure.delta(), &AppliedPatchDelta::empty());
         assert_eq!(fs::read_to_string(src).unwrap(), "line\n");
-        assert_eq!(fs::read_to_string(dest).unwrap(), "line2\n");
+        assert!(!dest.exists());
     }
 
     /// Verify that a single `Update File` hunk with multiple change chunks can update different
@@ -1288,7 +1590,7 @@ mod tests {
 
         fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o755)).unwrap();
 
-        assert!(!failure.delta().is_exact());
+        assert_eq!(failure.delta(), &AppliedPatchDelta::empty());
     }
 
     #[tokio::test]
@@ -1322,7 +1624,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_delete_symlink_returns_inexact_delta() {
+    async fn test_delete_symlink_is_rejected_without_mutation() {
         use std::os::unix::fs::symlink;
 
         let dir = tempdir().unwrap();
@@ -1332,7 +1634,7 @@ mod tests {
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let delta = apply_patch(
+        let failure = apply_patch(
             &patch,
             &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
             &mut stdout,
@@ -1341,8 +1643,178 @@ mod tests {
             /*sandbox*/ None,
         )
         .await
-        .unwrap();
+        .expect_err("symlink should be rejected");
 
-        assert!(!delta.is_exact());
+        assert_eq!(failure.delta(), &AppliedPatchDelta::empty());
+        assert!(dir.path().join("link.txt").is_symlink());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("target.txt")).unwrap(),
+            "target\n"
+        );
+    }
+
+    async fn verified_action(dir: &Path, patch: &str) -> ApplyPatchAction {
+        let cwd = PathUri::from_host_native_path(dir).expect("absolute test path");
+        let args = parse_patch(patch).expect("valid patch");
+        match verify_apply_patch_args(args, &cwd, LOCAL_FS.as_ref(), /*sandbox*/ None).await {
+            MaybeApplyPatchVerified::Body(action) => action,
+            result => panic!("expected verified action, got {result:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_and_rolled_back_batches_return_empty_exact_delta() {
+        let dir = tempdir().unwrap();
+        let patch = wrap_patch("*** Add File: new.txt\n+new");
+        let action = verified_action(dir.path(), &patch).await;
+
+        for outcome in [
+            FileMutationBatchOutcome::Rejected {
+                error: "preimage changed".to_string(),
+            },
+            FileMutationBatchOutcome::RolledBack {
+                error: "write failed".to_string(),
+            },
+        ] {
+            let fs = BatchOutcomeFileSystem {
+                outcome,
+                simulate_rolled_back_commit: false,
+                unsupported_batch: false,
+            };
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let failure = apply_patch_action(
+                &action,
+                &mut stdout,
+                &mut stderr,
+                &fs,
+                /*sandbox*/ None,
+            )
+            .await
+            .expect_err("batch should fail");
+
+            assert_eq!(failure.delta(), &AppliedPatchDelta::empty());
+            assert!(!failure.is_indeterminate());
+            assert!(!dir.path().join("new.txt").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn rolled_back_move_restores_source_and_destination() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.txt");
+        let destination = dir.path().join("destination.txt");
+        fs::write(&source, "source\n").unwrap();
+        fs::write(&destination, "destination\n").unwrap();
+        let patch = wrap_patch(
+            "*** Update File: source.txt\n*** Move to: destination.txt\n@@\n-source\n+updated",
+        );
+        let action = verified_action(dir.path(), &patch).await;
+        let fs = BatchOutcomeFileSystem {
+            outcome: FileMutationBatchOutcome::RolledBack {
+                error: "source remove failed".to_string(),
+            },
+            simulate_rolled_back_commit: true,
+            unsupported_batch: false,
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let failure = apply_patch_action(
+            &action,
+            &mut stdout,
+            &mut stderr,
+            &fs,
+            /*sandbox*/ None,
+        )
+        .await
+        .expect_err("batch should roll back");
+
+        assert_eq!(failure.delta(), &AppliedPatchDelta::empty());
+        assert_eq!(fs::read_to_string(source).unwrap(), "source\n");
+        assert_eq!(fs::read_to_string(destination).unwrap(), "destination\n");
+    }
+
+    #[tokio::test]
+    async fn indeterminate_batch_returns_filtered_inexact_delta() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.txt");
+        let destination = dir.path().join("destination.txt");
+        fs::write(&source, "source\n").unwrap();
+        let patch = wrap_patch(
+            "*** Update File: source.txt\n*** Move to: destination.txt\n@@\n-source\n+updated",
+        );
+        let action = verified_action(dir.path(), &patch).await;
+        let destination_uri =
+            PathUri::from_host_native_path(&destination).expect("absolute destination path");
+        let fs = BatchOutcomeFileSystem {
+            outcome: FileMutationBatchOutcome::Indeterminate {
+                error: "rollback failed".to_string(),
+                possibly_mutated_paths: vec![destination_uri.clone()],
+            },
+            simulate_rolled_back_commit: false,
+            unsupported_batch: false,
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let failure = apply_patch_action(
+            &action,
+            &mut stdout,
+            &mut stderr,
+            &fs,
+            /*sandbox*/ None,
+        )
+        .await
+        .expect_err("batch should be indeterminate");
+
+        assert!(failure.is_indeterminate());
+        assert!(!failure.delta().is_exact());
+        assert_eq!(failure.delta().changes().len(), 1);
+        assert!(matches!(
+            &failure.delta().changes()[0].change,
+            AppliedPatchFileChange::Update {
+                move_path: Some(path),
+                ..
+            } if path == &destination_uri
+        ));
+    }
+
+    #[tokio::test]
+    async fn unsupported_batch_uses_legacy_sequential_fallback() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("updated.txt"), "before\n").unwrap();
+        fs::write(dir.path().join("deleted.txt"), "delete\n").unwrap();
+        let patch = wrap_patch(
+            "*** Add File: added.txt\n+added\n*** Update File: updated.txt\n@@\n-before\n+after\n*** Delete File: deleted.txt",
+        );
+        let action = verified_action(dir.path(), &patch).await;
+        let fs = BatchOutcomeFileSystem {
+            outcome: FileMutationBatchOutcome::Committed,
+            simulate_rolled_back_commit: false,
+            unsupported_batch: true,
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        apply_patch_action(
+            &action,
+            &mut stdout,
+            &mut stderr,
+            &fs,
+            /*sandbox*/ None,
+        )
+        .await
+        .expect("legacy fallback should apply the patch");
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join("added.txt")).unwrap(),
+            "added\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("updated.txt")).unwrap(),
+            "after\n"
+        );
+        assert!(!dir.path().join("deleted.txt").exists());
     }
 }

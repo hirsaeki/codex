@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_file_system::FileMutation;
+use codex_file_system::FileMutationBatchOutcome;
+use codex_file_system::FilePreimage;
 use codex_file_system::FileSystemSandboxContext;
 pub use codex_file_system::WalkOptions;
 pub use codex_file_system::WalkOutcome;
@@ -40,6 +43,9 @@ pub const FS_READ_DIRECTORY_METHOD: &str = "fs/readDirectory";
 pub const FS_WALK_METHOD: &str = "fs/walk";
 pub const FS_REMOVE_METHOD: &str = "fs/remove";
 pub const FS_COPY_METHOD: &str = "fs/copy";
+pub const FS_MUTATE_BATCH_METHOD: &str = "fs/mutateBatch";
+pub const MAX_FS_MUTATE_BATCH_OPERATIONS: usize = 10_000;
+pub const MAX_FS_MUTATE_BATCH_DECODED_BYTES: usize = 512 * 1024 * 1024;
 /// Discovers capability manifests below selected roots using executor-local filesystem access.
 pub const CAPABILITY_ROOTS_DISCOVER_METHOD: &str = "capabilityRoots/discoverV1";
 /// Ordered plugin manifest paths recognized beneath a plugin root.
@@ -121,6 +127,9 @@ pub struct EnvironmentCapabilities {
     /// Whether filesystem streams can use the requested platform sandbox.
     #[serde(default)]
     pub sandboxed_file_streaming: bool,
+    /// Whether this executor supports rollback-backed filesystem mutation batches.
+    #[serde(default)]
+    pub file_system_batch_mutation: bool,
 }
 
 /// Status returned by an initialized exec-server connection.
@@ -183,6 +192,7 @@ impl EnvironmentInfo {
                 capability_discovery_sandbox: true,
                 environment_config_read: true,
                 sandboxed_file_streaming: true,
+                file_system_batch_mutation: true,
             },
         }
     }
@@ -524,6 +534,113 @@ pub struct FsCopyParams {
 #[serde(rename_all = "camelCase")]
 pub struct FsCopyResponse {}
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsMutateBatchParams {
+    pub mutations: Vec<FsMutation>,
+    pub sandbox: Option<FileSystemSandboxContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsMutateBatchResponse {
+    pub outcome: FsMutationBatchOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum FsMutation {
+    Write {
+        path: PathUri,
+        expected: FsFilePreimage,
+        contents: ByteChunk,
+    },
+    Remove {
+        path: PathUri,
+        expected: ByteChunk,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "contents", rename_all = "camelCase")]
+pub enum FsFilePreimage {
+    Missing,
+    Exact(ByteChunk),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum FsMutationBatchOutcome {
+    Committed,
+    Rejected {
+        error: String,
+    },
+    RolledBack {
+        error: String,
+    },
+    Indeterminate {
+        error: String,
+        possibly_mutated_paths: Vec<PathUri>,
+    },
+}
+
+impl From<FileMutation> for FsMutation {
+    fn from(mutation: FileMutation) -> Self {
+        match mutation {
+            FileMutation::Write {
+                path,
+                expected,
+                contents,
+            } => Self::Write {
+                path,
+                expected: match expected {
+                    FilePreimage::Missing => FsFilePreimage::Missing,
+                    FilePreimage::Exact(contents) => FsFilePreimage::Exact(contents.into()),
+                },
+                contents: contents.into(),
+            },
+            FileMutation::Remove { path, expected } => Self::Remove {
+                path,
+                expected: expected.into(),
+            },
+        }
+    }
+}
+
+impl From<FileMutationBatchOutcome> for FsMutationBatchOutcome {
+    fn from(outcome: FileMutationBatchOutcome) -> Self {
+        match outcome {
+            FileMutationBatchOutcome::Committed => Self::Committed,
+            FileMutationBatchOutcome::Rejected { error } => Self::Rejected { error },
+            FileMutationBatchOutcome::RolledBack { error } => Self::RolledBack { error },
+            FileMutationBatchOutcome::Indeterminate {
+                error,
+                possibly_mutated_paths,
+            } => Self::Indeterminate {
+                error,
+                possibly_mutated_paths,
+            },
+        }
+    }
+}
+
+impl From<FsMutationBatchOutcome> for FileMutationBatchOutcome {
+    fn from(outcome: FsMutationBatchOutcome) -> Self {
+        match outcome {
+            FsMutationBatchOutcome::Committed => Self::Committed,
+            FsMutationBatchOutcome::Rejected { error } => Self::Rejected { error },
+            FsMutationBatchOutcome::RolledBack { error } => Self::RolledBack { error },
+            FsMutationBatchOutcome::Indeterminate {
+                error,
+                possibly_mutated_paths,
+            } => Self::Indeterminate {
+                error,
+                possibly_mutated_paths,
+            },
+        }
+    }
+}
+
 /// Roots to inspect for plugin and skill capability manifests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -803,16 +920,22 @@ mod base64_bytes {
 
 #[cfg(test)]
 mod tests {
+    use super::ByteChunk;
     use super::EnvironmentCapabilities;
     use super::EnvironmentInfo;
     use super::ExecExitedNotification;
     use super::ExecParams;
     use super::ExecResponse;
+    use super::FsFilePreimage;
+    use super::FsMutateBatchParams;
+    use super::FsMutation;
+    use super::FsMutationBatchOutcome;
     use super::FsReadFileParams;
     use super::HttpRequestParams;
     use super::ProcessId;
     use super::ProcessSandboxType;
     use super::ShellInfo;
+    use codex_file_system::FileMutationBatchOutcome;
     use codex_file_system::FileSystemSandboxContext;
     use codex_network_proxy::ManagedNetworkSandboxContext;
     use codex_network_proxy::NetworkProxyAuditMetadata;
@@ -936,8 +1059,55 @@ mod tests {
                 capability_discovery_sandbox: true,
                 environment_config_read: false,
                 sandboxed_file_streaming: false,
+                file_system_batch_mutation: false,
             }
         );
+    }
+
+    #[test]
+    fn filesystem_mutation_batch_round_trips_bytes() {
+        let path = PathUri::from_host_native_path(
+            std::env::current_dir()
+                .expect("current directory")
+                .join("batch.txt"),
+        )
+        .expect("path URI");
+        let params = FsMutateBatchParams {
+            mutations: vec![
+                FsMutation::Write {
+                    path: path.clone(),
+                    expected: FsFilePreimage::Exact(ByteChunk(b"before".to_vec())),
+                    contents: ByteChunk(b"after".to_vec()),
+                },
+                FsMutation::Write {
+                    path: path.clone(),
+                    expected: FsFilePreimage::Missing,
+                    contents: ByteChunk(vec![0, 1, 2, 255]),
+                },
+                FsMutation::Remove {
+                    path: path.clone(),
+                    expected: ByteChunk(vec![255, 0, 127]),
+                },
+            ],
+            sandbox: None,
+        };
+
+        let json = serde_json::to_value(&params).expect("serialize batch");
+        assert_eq!(
+            json["mutations"][1]["expected"],
+            serde_json::json!({ "type": "missing" })
+        );
+        let decoded: FsMutateBatchParams = serde_json::from_value(json).expect("deserialize batch");
+
+        assert_eq!(decoded, params);
+
+        let outcome = FileMutationBatchOutcome::Indeterminate {
+            error: "transport lost".to_string(),
+            possibly_mutated_paths: vec![path],
+        };
+        let protocol_outcome: FsMutationBatchOutcome = outcome.clone().into();
+        let decoded_outcome: FileMutationBatchOutcome = protocol_outcome.into();
+        assert_eq!(decoded_outcome, outcome);
     }
 
     #[test]
@@ -951,6 +1121,7 @@ mod tests {
                 "capabilityDiscoverySandbox": false,
                 "environmentConfigRead": false,
                 "sandboxedFileStreaming": false,
+                "fileSystemBatchMutation": false,
             },
         });
         let info: EnvironmentInfo = serde_json::from_value(expected.clone())
