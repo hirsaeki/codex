@@ -738,7 +738,7 @@ fn matches_expected(snapshot: &Snapshot, mutation: &FileMutation) -> bool {
 }
 
 fn read_snapshot(path: &Path) -> io::Result<Snapshot> {
-    read_snapshot_with_limit(path, None)
+    read_snapshot_with_limit(path, /*max_bytes*/ None)
 }
 
 fn read_snapshot_with_limit(path: &Path, max_bytes: Option<usize>) -> io::Result<Snapshot> {
@@ -754,7 +754,7 @@ fn read_snapshot_with_limit(path: &Path, max_bytes: Option<usize>) -> io::Result
 }
 
 fn read_snapshot_from_file(file: &mut File, path: &Path) -> io::Result<Snapshot> {
-    read_snapshot_from_file_with_limit(file, path, None)
+    read_snapshot_from_file_with_limit(file, path, /*max_bytes*/ None)
 }
 
 fn read_snapshot_from_file_with_limit(
