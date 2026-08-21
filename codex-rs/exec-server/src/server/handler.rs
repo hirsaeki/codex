@@ -37,6 +37,8 @@ use crate::protocol::FsCreateDirectoryParams;
 use crate::protocol::FsCreateDirectoryResponse;
 use crate::protocol::FsGetMetadataParams;
 use crate::protocol::FsGetMetadataResponse;
+use crate::protocol::FsMutateBatchParams;
+use crate::protocol::FsMutateBatchResponse;
 use crate::protocol::FsOpenParams;
 use crate::protocol::FsOpenResponse;
 use crate::protocol::FsReadBlockParams;
@@ -378,6 +380,14 @@ impl ExecServerHandler {
     ) -> Result<FsCopyResponse, JSONRPCErrorError> {
         self.require_initialized_for("filesystem")?;
         self.file_system.copy(params).await
+    }
+
+    pub(crate) async fn fs_mutate_batch(
+        &self,
+        params: FsMutateBatchParams,
+    ) -> Result<FsMutateBatchResponse, JSONRPCErrorError> {
+        self.require_initialized_for("filesystem")?;
+        self.file_system.mutate_batch(params).await
     }
 
     fn require_initialized_for(

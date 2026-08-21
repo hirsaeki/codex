@@ -17,6 +17,8 @@ use crate::ExecutorFileSystem;
 use crate::ExecutorFileSystemFuture;
 use crate::FILE_READ_CHUNK_SIZE;
 use crate::FileMetadata;
+use crate::FileMutationBatch;
+use crate::FileMutationBatchOutcome;
 use crate::FileSystemReadStream;
 use crate::FileSystemResult;
 use crate::FileSystemSandboxContext;
@@ -141,6 +143,15 @@ impl LocalFileSystem {
         file_system.write_file(path, contents, sandbox).await
     }
 
+    async fn mutate_batch(
+        &self,
+        batch: FileMutationBatch,
+        sandbox: Option<&FileSystemSandboxContext>,
+    ) -> FileSystemResult<FileMutationBatchOutcome> {
+        let (file_system, sandbox) = self.file_system_for(sandbox)?;
+        file_system.mutate_batch(batch, sandbox).await
+    }
+
     async fn create_directory(
         &self,
         path: &PathUri,
@@ -235,6 +246,14 @@ impl ExecutorFileSystem for LocalFileSystem {
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, ()> {
         Box::pin(LocalFileSystem::write_file(self, path, contents, sandbox))
+    }
+
+    fn mutate_batch<'a>(
+        &'a self,
+        batch: FileMutationBatch,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, FileMutationBatchOutcome> {
+        Box::pin(LocalFileSystem::mutate_batch(self, batch, sandbox))
     }
 
     fn create_directory<'a>(
@@ -352,6 +371,15 @@ impl UnsandboxedFileSystem {
             .await
     }
 
+    async fn mutate_batch(
+        &self,
+        batch: FileMutationBatch,
+        sandbox: Option<&FileSystemSandboxContext>,
+    ) -> FileSystemResult<FileMutationBatchOutcome> {
+        reject_platform_sandbox_context(sandbox)?;
+        self.file_system.mutate_batch(batch, /*sandbox*/ None).await
+    }
+
     async fn create_directory(
         &self,
         path: &PathUri,
@@ -449,6 +477,14 @@ impl ExecutorFileSystem for UnsandboxedFileSystem {
         Box::pin(UnsandboxedFileSystem::write_file(
             self, path, contents, sandbox,
         ))
+    }
+
+    fn mutate_batch<'a>(
+        &'a self,
+        batch: FileMutationBatch,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, FileMutationBatchOutcome> {
+        Box::pin(UnsandboxedFileSystem::mutate_batch(self, batch, sandbox))
     }
 
     fn create_directory<'a>(
@@ -568,6 +604,33 @@ impl DirectFileSystem {
         reject_sandbox_context(sandbox)?;
         let path = path.to_abs_path()?;
         tokio::fs::write(path.as_path(), contents).await
+    }
+
+    async fn mutate_batch(
+        &self,
+        batch: FileMutationBatch,
+        sandbox: Option<&FileSystemSandboxContext>,
+    ) -> FileSystemResult<FileMutationBatchOutcome> {
+        reject_sandbox_context(sandbox)?;
+        let possibly_mutated_paths = batch
+            .mutations
+            .iter()
+            .map(|mutation| match mutation {
+                crate::FileMutation::Write { path, .. }
+                | crate::FileMutation::Remove { path, .. } => path.clone(),
+            })
+            .collect();
+        // Once a spawn_blocking task starts, dropping this future does not cancel the mutation.
+        // A join failure therefore cannot prove that the filesystem is unchanged.
+        match tokio::task::spawn_blocking(move || crate::file_mutation_batch::mutate_batch(batch))
+            .await
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => Ok(FileMutationBatchOutcome::Indeterminate {
+                error: format!("filesystem task failed: {error}"),
+                possibly_mutated_paths,
+            }),
+        }
     }
 
     async fn create_directory(
@@ -751,6 +814,14 @@ impl ExecutorFileSystem for DirectFileSystem {
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, ()> {
         Box::pin(DirectFileSystem::write_file(self, path, contents, sandbox))
+    }
+
+    fn mutate_batch<'a>(
+        &'a self,
+        batch: FileMutationBatch,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, FileMutationBatchOutcome> {
+        Box::pin(DirectFileSystem::mutate_batch(self, batch, sandbox))
     }
 
     fn create_directory<'a>(

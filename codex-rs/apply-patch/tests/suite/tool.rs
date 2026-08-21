@@ -285,10 +285,27 @@ fn test_apply_patch_cli_rejects_missing_file_delete() -> anyhow::Result<()> {
         .assert()
         .failure()
         .stderr(format!(
-            "Failed to delete file {}\n",
+            "Failed to read file to delete {}: No such file or directory (os error 2)\n",
             missing_path.display()
         ));
 
+    Ok(())
+}
+
+#[test]
+fn test_apply_patch_cli_deletes_non_utf8_file() -> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let target_path = tmp.path().join("binary.dat");
+    fs::write(&target_path, [0xff, 0xfe, 0x00, 0x80])?;
+
+    run_apply_patch_in_dir(
+        tmp.path(),
+        "*** Begin Patch\n*** Delete File: binary.dat\n*** End Patch",
+    )?
+    .success()
+    .stdout("Success. Updated the following files:\nD binary.dat\n");
+
+    assert!(!target_path.exists());
     Ok(())
 }
 
@@ -375,8 +392,9 @@ fn test_apply_patch_cli_delete_directory_fails() -> anyhow::Result<()> {
         .assert()
         .failure()
         .stderr(format!(
-            "Failed to delete file {}\n",
-            expected_dir.display()
+            "Failed to read {}: path `{}` is not a file\n",
+            expected_dir.display(),
+            expected_dir.display(),
         ));
 
     Ok(())
@@ -416,7 +434,7 @@ fn test_apply_patch_cli_updates_file_appends_trailing_newline() -> anyhow::Resul
 }
 
 #[test]
-fn test_apply_patch_cli_failure_after_partial_success_leaves_changes() -> anyhow::Result<()> {
+fn test_apply_patch_cli_failure_leaves_files_unchanged() -> anyhow::Result<()> {
     let tmp = tempdir()?;
     let new_file = tmp.path().join("created.txt");
     let missing_file = resolved_under(tmp.path(), "missing.txt")?;
@@ -431,7 +449,64 @@ fn test_apply_patch_cli_failure_after_partial_success_leaves_changes() -> anyhow
             missing_file.display()
         ));
 
-    assert_eq!(fs::read_to_string(&new_file)?, "hello\n");
+    assert!(!new_file.exists());
 
+    Ok(())
+}
+
+#[test]
+fn test_apply_patch_cli_move_destination_is_visible_to_later_hunk() -> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let source = tmp.path().join("source.txt");
+    let destination = tmp.path().join("destination.txt");
+    fs::write(&source, "one\r\n")?;
+
+    run_apply_patch_in_dir(
+        tmp.path(),
+        "*** Begin Patch\n*** Update File: source.txt\n*** Move to: destination.txt\n@@\n-one\n+two\n*** Update File: destination.txt\n@@\n-two\n+three\n*** End Patch",
+    )?
+    .success();
+
+    assert!(!source.exists());
+    assert_eq!(fs::read(&destination)?, b"three\r\n");
+    Ok(())
+}
+
+#[test]
+fn test_apply_patch_cli_applies_repeated_source_paths_in_order() -> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("repeated-source.txt");
+    fs::write(&path, "one\n")?;
+
+    run_apply_patch_in_dir(
+        tmp.path(),
+        "*** Begin Patch\n*** Update File: repeated-source.txt\n@@\n-one\n+two\n*** Update File: ./repeated-source.txt\n@@\n-two\n+three\n*** End Patch",
+    )?
+    .success()
+    .stdout(
+        "Success. Updated the following files:\nM repeated-source.txt\nM ./repeated-source.txt\n",
+    );
+
+    assert_eq!(fs::read_to_string(path)?, "three\n");
+    Ok(())
+}
+
+#[test]
+fn test_apply_patch_cli_rejects_self_move_without_deleting_file() -> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("same.txt");
+    fs::write(&path, "before\n")?;
+
+    run_apply_patch_in_dir(
+        tmp.path(),
+        "*** Begin Patch\n*** Update File: same.txt\n*** Move to: same.txt\n@@\n-before\n+after\n*** End Patch",
+    )?
+    .failure()
+    .stderr(format!(
+        "invalid patch: move destination is the same as source {}\n",
+        path.display()
+    ));
+
+    assert_eq!(fs::read_to_string(path)?, "before\n");
     Ok(())
 }

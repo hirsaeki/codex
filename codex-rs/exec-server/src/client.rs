@@ -71,6 +71,7 @@ use crate::protocol::FS_CLOSE_METHOD;
 use crate::protocol::FS_COPY_METHOD;
 use crate::protocol::FS_CREATE_DIRECTORY_METHOD;
 use crate::protocol::FS_GET_METADATA_METHOD;
+use crate::protocol::FS_MUTATE_BATCH_METHOD;
 use crate::protocol::FS_OPEN_METHOD;
 use crate::protocol::FS_READ_BLOCK_METHOD;
 use crate::protocol::FS_READ_DIRECTORY_METHOD;
@@ -88,6 +89,8 @@ use crate::protocol::FsCreateDirectoryParams;
 use crate::protocol::FsCreateDirectoryResponse;
 use crate::protocol::FsGetMetadataParams;
 use crate::protocol::FsGetMetadataResponse;
+use crate::protocol::FsMutateBatchParams;
+use crate::protocol::FsMutateBatchResponse;
 use crate::protocol::FsOpenParams;
 use crate::protocol::FsOpenResponse;
 use crate::protocol::FsReadBlockParams;
@@ -909,6 +912,13 @@ impl ExecServerClient {
 
     pub async fn fs_copy(&self, params: FsCopyParams) -> Result<FsCopyResponse, ExecServerError> {
         self.call(FS_COPY_METHOD, &params).await
+    }
+
+    pub async fn fs_mutate_batch(
+        &self,
+        params: FsMutateBatchParams,
+    ) -> Result<FsMutateBatchResponse, ExecServerError> {
+        self.call(FS_MUTATE_BATCH_METHOD, &params).await
     }
 
     pub(crate) async fn start_process(

@@ -67,6 +67,46 @@ pub struct FileMetadata {
     pub modified_at_ms: i64,
 }
 
+/// One owned, rollback-backed batch of regular-file mutations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileMutationBatch {
+    pub mutations: Vec<FileMutation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FileMutation {
+    Write {
+        path: PathUri,
+        expected: FilePreimage,
+        contents: Vec<u8>,
+    },
+    Remove {
+        path: PathUri,
+        expected: Vec<u8>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FilePreimage {
+    Missing,
+    Exact(Vec<u8>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FileMutationBatchOutcome {
+    Committed,
+    Rejected {
+        error: String,
+    },
+    RolledBack {
+        error: String,
+    },
+    Indeterminate {
+        error: String,
+        possibly_mutated_paths: Vec<PathUri>,
+    },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReadDirectoryEntry {
     pub file_name: String,
@@ -448,6 +488,20 @@ pub trait ExecutorFileSystem: Send + Sync {
         contents: Vec<u8>,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, ()>;
+
+    /// Applies regular-file mutations as one rollback-backed logical batch.
+    fn mutate_batch<'a>(
+        &'a self,
+        _batch: FileMutationBatch,
+        _sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, FileMutationBatchOutcome> {
+        Box::pin(async {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "filesystem mutation batches are unsupported",
+            ))
+        })
+    }
 
     fn create_directory<'a>(
         &'a self,

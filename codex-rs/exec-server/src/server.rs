@@ -1,4 +1,5 @@
 mod file_system_handler;
+pub(crate) use file_system_handler::mutate_batch;
 mod handler;
 mod process_handler;
 mod processor;

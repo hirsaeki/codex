@@ -12,6 +12,9 @@ use crate::ExecutorFileSystem;
 use crate::ExecutorFileSystemFuture;
 use crate::FILE_READ_CHUNK_SIZE;
 use crate::FileMetadata;
+use crate::FileMutation;
+use crate::FileMutationBatch;
+use crate::FileMutationBatchOutcome;
 use crate::FileSystemReadStream;
 use crate::FileSystemResult;
 use crate::FileSystemSandboxContext;
@@ -26,6 +29,7 @@ use crate::protocol::FsCanonicalizeParams;
 use crate::protocol::FsCopyParams;
 use crate::protocol::FsCreateDirectoryParams;
 use crate::protocol::FsGetMetadataParams;
+use crate::protocol::FsMutateBatchParams;
 use crate::protocol::FsReadDirectoryParams;
 use crate::protocol::FsReadFileParams;
 use crate::protocol::FsRemoveParams;
@@ -292,9 +296,73 @@ impl SandboxedFileSystem {
         .map_err(map_sandbox_error)?;
         Ok(())
     }
+
+    async fn mutate_batch(
+        &self,
+        batch: FileMutationBatch,
+        sandbox: Option<&FileSystemSandboxContext>,
+    ) -> FileSystemResult<FileMutationBatchOutcome> {
+        let sandbox = require_platform_sandbox(sandbox)?;
+        for mutation in &batch.mutations {
+            let path = match mutation {
+                FileMutation::Write { path, .. } | FileMutation::Remove { path, .. } => path,
+            };
+            validate_native_path(path)?;
+        }
+        let possibly_mutated_paths = batch
+            .mutations
+            .iter()
+            .map(|mutation| match mutation {
+                FileMutation::Write { path, .. } | FileMutation::Remove { path, .. } => {
+                    path.clone()
+                }
+            })
+            .collect();
+        let response = match self
+            .run_sandboxed(
+                sandbox,
+                FsHelperRequest::MutateBatch(FsMutateBatchParams {
+                    mutations: batch.mutations.into_iter().map(Into::into).collect(),
+                    sandbox: None,
+                }),
+            )
+            .await
+        {
+            Ok(payload) => match payload.expect_mutate_batch() {
+                Ok(response) => response,
+                Err(error) => {
+                    return Ok(FileMutationBatchOutcome::Indeterminate {
+                        error: error.message,
+                        possibly_mutated_paths,
+                    });
+                }
+            },
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
+                return Ok(FileMutationBatchOutcome::Rejected {
+                    error: error.to_string(),
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => return Err(error),
+            Err(error) => {
+                return Ok(FileMutationBatchOutcome::Indeterminate {
+                    error: error.to_string(),
+                    possibly_mutated_paths,
+                });
+            }
+        };
+        Ok(response.outcome.into())
+    }
 }
 
 impl ExecutorFileSystem for SandboxedFileSystem {
+    fn mutate_batch<'a>(
+        &'a self,
+        batch: FileMutationBatch,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, FileMutationBatchOutcome> {
+        Box::pin(SandboxedFileSystem::mutate_batch(self, batch, sandbox))
+    }
+
     fn canonicalize<'a>(
         &'a self,
         path: &'a PathUri,
@@ -424,6 +492,7 @@ fn map_sandbox_error(error: JSONRPCErrorError) -> io::Error {
     match error.code {
         -32004 => io::Error::new(io::ErrorKind::NotFound, error.message),
         -32600 => io::Error::new(io::ErrorKind::InvalidInput, error.message),
+        -32601 => io::Error::new(io::ErrorKind::Unsupported, error.message),
         _ => io::Error::other(error.message),
     }
 }

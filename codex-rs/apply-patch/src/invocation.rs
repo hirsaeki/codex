@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use codex_exec_server::ExecutorFileSystem;
@@ -11,15 +10,10 @@ use tree_sitter_bash::LANGUAGE as BASH;
 use crate::ApplyPatchAction;
 use crate::ApplyPatchArgs;
 use crate::ApplyPatchError;
-use crate::ApplyPatchFileChange;
-use crate::ApplyPatchFileUpdate;
 use crate::ApplyPatchFileUpdateMode;
-use crate::IoError;
 use crate::MaybeApplyPatchVerified;
-use crate::parser::Hunk;
 use crate::parser::ParseError;
 use crate::parser::parse_patch;
-use crate::unified_diff_from_chunks_with_mode;
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
 use std::str::Utf8Error;
@@ -229,60 +223,20 @@ async fn try_verify_apply_patch_args(
         .map(|dir| cwd.join(dir))
         .transpose()?
         .unwrap_or_else(|| cwd.clone());
-    let mut changes = HashMap::new();
-    for hunk in hunks {
-        let path = hunk.resolve_path(&effective_cwd)?;
-        if changes.contains_key(&path) {
-            return Err(ParseError::InvalidPatchError(format!(
-                "multiple operations target {}",
-                path.inferred_native_path_string()
-            ))
-            .into());
-        }
-        match hunk {
-            Hunk::AddFile { contents, .. } => {
-                changes.insert(path, ApplyPatchFileChange::Add { content: contents });
-            }
-            Hunk::DeleteFile { .. } => {
-                let content = fs.read_file_text(&path, sandbox).await.map_err(|source| {
-                    ApplyPatchError::IoError(IoError {
-                        context: format!("Failed to read {}", path.inferred_native_path_string()),
-                        source,
-                    })
-                })?;
-                changes.insert(path, ApplyPatchFileChange::Delete { content });
-            }
-            Hunk::UpdateFile {
-                move_path, chunks, ..
-            } => {
-                let ApplyPatchFileUpdate {
-                    unified_diff,
-                    content: contents,
-                    ..
-                } = unified_diff_from_chunks_with_mode(
-                    &path,
-                    &chunks,
-                    update_file_mode,
-                    fs,
-                    sandbox,
-                )
-                .await?;
-                changes.insert(
-                    path,
-                    ApplyPatchFileChange::Update {
-                        unified_diff,
-                        move_path: move_path
-                            .map(|path| effective_cwd.join(&path.to_string_lossy()))
-                            .transpose()?,
-                        new_content: contents,
-                    },
-                );
-            }
-        }
-    }
-    Ok(ApplyPatchAction {
-        changes,
+    let prepared = crate::prepared::prepare_hunks(
+        &hunks,
         update_file_mode,
+        &effective_cwd,
+        fs,
+        sandbox,
+        crate::prepared::RepeatedSourcePaths::Reject,
+    )
+    .await?;
+    Ok(ApplyPatchAction {
+        changes: prepared.changes,
+        update_file_mode,
+        hunks,
+        prepared: prepared.prepared,
         patch,
         cwd: effective_cwd,
     })
@@ -443,10 +397,14 @@ fn extract_apply_patch_from_bash(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ApplyPatchFileChange;
+    use crate::ApplyPatchFileUpdate;
+    use crate::Hunk;
     use crate::unified_diff_from_chunks;
     use assert_matches::assert_matches;
     use codex_exec_server::LOCAL_FS;
     use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
     use std::string::ToString;
@@ -890,27 +848,30 @@ PATCH"#,
 
         // Verify the patch contents - as otherwise we may have pulled contents
         // from the wrong file (as we're using relative paths)
+        let MaybeApplyPatchVerified::Body(action) = result else {
+            panic!("expected verified patch action");
+        };
         assert_eq!(
-            result,
-            MaybeApplyPatchVerified::Body(ApplyPatchAction {
-                changes: HashMap::from([(
-                    PathUri::from_host_native_path(session_dir.path().join(relative_path))
-                        .expect("absolute test path"),
-                    ApplyPatchFileChange::Update {
-                        unified_diff: r#"@@ -1 +1 @@
+            action.changes,
+            HashMap::from([(
+                PathUri::from_host_native_path(session_dir.path().join(relative_path))
+                    .expect("absolute test path"),
+                ApplyPatchFileChange::Update {
+                    unified_diff: r#"@@ -1 +1 @@
 -session directory content
 +updated session directory content
 "#
-                        .to_string(),
-                        move_path: None,
-                        new_content: "updated session directory content\n".to_string(),
-                    },
-                )]),
-                update_file_mode: ApplyPatchFileUpdateMode::default(),
-                patch: argv[1].clone(),
-                cwd: PathUri::from_host_native_path(session_dir.path())
-                    .expect("absolute test path"),
-            })
+                    .to_string(),
+                    move_path: None,
+                    new_content: "updated session directory content\n".to_string(),
+                },
+            )])
+        );
+        assert_eq!(action.update_file_mode, ApplyPatchFileUpdateMode::default());
+        assert_eq!(action.patch, argv[1]);
+        assert_eq!(
+            action.cwd,
+            PathUri::from_host_native_path(session_dir.path()).expect("absolute test path")
         );
     }
 
