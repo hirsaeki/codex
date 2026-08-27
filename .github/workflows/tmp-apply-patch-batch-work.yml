@@ -9,36 +9,24 @@ permissions:
   contents: read
 
 jobs:
-  probe-legacy-wiring:
+  probe-legacy-full:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Probe old wiring against current tree
+      - name: Probe old full diff against current tree
         shell: bash
         run: |
           set -euxo pipefail
           git fetch origin 8118620cc9744e3f7fdf17decd3238164f818b8e
           parent="$(git rev-parse 8118620cc9744e3f7fdf17decd3238164f818b8e^)"
-          git diff "$parent" 8118620cc9744e3f7fdf17decd3238164f818b8e -- \
-            codex-rs/exec-server-protocol/src/protocol.rs \
-            codex-rs/exec-server/src/client.rs \
-            codex-rs/exec-server/src/fs_helper.rs \
-            codex-rs/exec-server/src/lib.rs \
-            codex-rs/exec-server/src/local_file_system.rs \
-            codex-rs/exec-server/src/remote_file_system.rs \
-            codex-rs/exec-server/src/sandboxed_file_system.rs \
-            codex-rs/exec-server/src/server.rs \
-            codex-rs/exec-server/src/server/file_system_handler.rs \
-            codex-rs/exec-server/src/server/handler.rs \
-            codex-rs/exec-server/src/server/registry.rs \
-            > /tmp/legacy-wiring.patch
-          if git apply --3way --check /tmp/legacy-wiring.patch; then
-            echo "LEGACY_WIRING_3WAY_CHECK=clean"
+          git diff "$parent" 8118620cc9744e3f7fdf17decd3238164f818b8e > /tmp/legacy.patch
+          if git apply --3way --check /tmp/legacy.patch; then
+            echo "LEGACY_FULL_3WAY_CHECK=clean"
           else
-            echo "LEGACY_WIRING_3WAY_CHECK=conflicts"
-            git apply --3way /tmp/legacy-wiring.patch || true
+            echo "LEGACY_FULL_3WAY_CHECK=conflicts"
+            git apply --3way /tmp/legacy.patch || true
             git status --short
             git diff --cc || true
             exit 1
