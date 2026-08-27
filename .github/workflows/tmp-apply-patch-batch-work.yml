@@ -55,4 +55,5 @@ jobs:
           cd codex-rs
           cargo fmt --all
           cargo check -p codex-file-system -p codex-exec-server-protocol -p codex-exec-server -p codex-apply-patch
+          cargo test -p codex-exec-server file_mutation_batch
           git diff --check
