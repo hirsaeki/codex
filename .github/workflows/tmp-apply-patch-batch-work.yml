@@ -9,25 +9,20 @@ permissions:
   contents: read
 
 jobs:
-  probe-legacy-full:
+  compile-legacy-baseline:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Probe old full diff against current tree
+      - name: Apply legacy diff as diagnostic baseline
         shell: bash
         run: |
           set -euxo pipefail
           git fetch origin 8118620cc9744e3f7fdf17decd3238164f818b8e
           parent="$(git rev-parse 8118620cc9744e3f7fdf17decd3238164f818b8e^)"
           git diff "$parent" 8118620cc9744e3f7fdf17decd3238164f818b8e > /tmp/legacy.patch
-          if git apply --3way --check /tmp/legacy.patch; then
-            echo "LEGACY_FULL_3WAY_CHECK=clean"
-          else
-            echo "LEGACY_FULL_3WAY_CHECK=conflicts"
-            git apply --3way /tmp/legacy.patch || true
-            git status --short
-            git diff --cc || true
-            exit 1
-          fi
+          git apply --3way /tmp/legacy.patch
+          git status --short
+          cd codex-rs
+          cargo check -p codex-apply-patch -p codex-exec-server -p codex-exec-server-protocol -p codex-file-system
