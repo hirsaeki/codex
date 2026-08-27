@@ -35,6 +35,16 @@ jobs:
             codex-rs/file-system/src/lib.rs \
             > /tmp/legacy-wiring.patch
           git apply --3way /tmp/legacy-wiring.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('codex-rs/exec-server-protocol/src/protocol.rs')
+          s = p.read_text()
+          needle = 'use codex_file_system::FileSystemSandboxContext;'
+          if s.count(needle) == 2:
+              pos = s.rfind(needle)
+              s = s[:pos] + 'use codex_file_system::{FileSystemSandboxContext};' + s[pos + len(needle):]
+              p.write_text(s)
+          PY
           python3 .github/tmp-apply-patch-batch-rework.py
           cd codex-rs
           cargo fmt --all -- --check
