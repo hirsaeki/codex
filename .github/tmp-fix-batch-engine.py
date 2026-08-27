@@ -77,4 +77,5 @@ s = s.replace(
 marker = "// These helpers intentionally remain tiny; they make ownership moves in the main loop explicit.\n"
 if marker in s:
     s = s[: s.index(marker)]
+s += '\n#[cfg(test)]\n#[path = "file_mutation_batch_tests.rs"]\nmod tests;\n'
 p.write_text(s)
