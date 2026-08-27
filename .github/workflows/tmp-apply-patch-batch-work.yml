@@ -9,20 +9,33 @@ permissions:
   contents: read
 
 jobs:
-  compile-legacy-baseline:
+  compile-reworked-batch:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Apply legacy diff as diagnostic baseline
+      - name: Build current-architecture batch implementation
         shell: bash
         run: |
           set -euxo pipefail
           git fetch origin 8118620cc9744e3f7fdf17decd3238164f818b8e
           parent="$(git rev-parse 8118620cc9744e3f7fdf17decd3238164f818b8e^)"
-          git diff "$parent" 8118620cc9744e3f7fdf17decd3238164f818b8e > /tmp/legacy.patch
-          git apply --3way /tmp/legacy.patch
-          git status --short
+          git diff "$parent" 8118620cc9744e3f7fdf17decd3238164f818b8e -- \
+            codex-rs/apply-patch/src/file_update.rs \
+            codex-rs/exec-server/src/client.rs \
+            codex-rs/exec-server/src/fs_helper.rs \
+            codex-rs/exec-server/src/lib.rs \
+            codex-rs/exec-server/src/local_file_system.rs \
+            codex-rs/exec-server/src/remote_file_system.rs \
+            codex-rs/exec-server/src/sandboxed_file_system.rs \
+            codex-rs/exec-server/src/server.rs \
+            codex-rs/exec-server/src/server/handler.rs \
+            codex-rs/exec-server/src/server/registry.rs \
+            codex-rs/file-system/src/lib.rs \
+            > /tmp/legacy-wiring.patch
+          git apply --3way /tmp/legacy-wiring.patch
+          python3 .github/tmp-apply-patch-batch-rework.py
           cd codex-rs
-          cargo check -p codex-apply-patch -p codex-exec-server -p codex-exec-server-protocol -p codex-file-system
+          cargo fmt --all -- --check
+          cargo check -p codex-file-system -p codex-exec-server-protocol -p codex-exec-server -p codex-apply-patch
