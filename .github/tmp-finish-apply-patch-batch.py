@@ -92,9 +92,43 @@ text = p.read_text().replace(
 )
 p.write_text(text)
 
-# Keep the focused batch test module warning-free.
+# Keep the focused batch test module warning-free and cover rollback of created parent trees.
 path = "codex-rs/exec-server/src/file_mutation_batch_tests.rs"
 p = Path(path)
 if p.exists():
     text = p.read_text().replace("use crate::FileSystemResult;\n", "", 1)
+    anchor = '''#[tokio::test]
+async fn rollback_failure_is_indeterminate() -> io::Result<()> {
+'''
+    test = '''#[tokio::test]
+async fn nested_parent_creation_is_rolled_back_after_later_failure() -> io::Result<()> {
+    let temp = TempDir::new()?;
+    let nested = temp.path().join("new/a/b/file.txt");
+    let second = temp.path().join("second.txt");
+    std::fs::write(&second, b"before")?;
+    let fs = FailingFs::new(Some(2), false);
+
+    let outcome = mutate_batch_on(
+        &fs,
+        batch(
+            vec![
+                write(&nested, FilePreimage::Missing, b"added"),
+                write(&second, FilePreimage::Exact(b"before".to_vec()), b"after"),
+            ],
+            false,
+        ),
+    )
+    .await;
+
+    assert!(matches!(outcome, FileMutationBatchOutcome::RolledBack { .. }));
+    assert!(!nested.exists());
+    assert!(!temp.path().join("new").exists());
+    assert_eq!(std::fs::read(second)?, b"before");
+    Ok(())
+}
+
+'''
+    if text.count(anchor) != 1:
+        raise RuntimeError("batch nested rollback test anchor mismatch")
+    text = text.replace(anchor, test + anchor, 1)
     p.write_text(text)
