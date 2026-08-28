@@ -1,0 +1,197 @@
+name: p1-windows-setup-refresh-measurement
+
+on:
+  push:
+    branches:
+      - perf/cache-windows-sandbox-setup-refresh
+    paths:
+      - .github/workflows/p1-windows-measurement.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: Native Windows P1 measurement
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Patch baseline harness for fresh-process P1 measurement
+        shell: pwsh
+        working-directory: .
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = 'codex-rs/core/tests/windows_apply_patch_baseline.rs'
+          $text = Get-Content -Raw $path
+          $text = $text.Replace(
+            'struct SandboxLogStats {' + "`n" + '    helper_starts: usize,' + "`n" + '    setup_refreshes: usize,' + "`n" + '    setup_refresh_total_ms: f64,' + "`n" + '}',
+            'struct SandboxLogStats {' + "`n" + '    helper_starts: usize,' + "`n" + '    setup_refreshes: usize,' + "`n" + '    setup_refresh_cache_hits: usize,' + "`n" + '    setup_refresh_total_ms: f64,' + "`n" + '}'
+          )
+          $text = $text.Replace(
+            '    setup_refreshes: usize,' + "`n" + '    setup_refresh_total_ms: f64,' + "`n" + '}',
+            '    setup_refreshes: usize,' + "`n" + '    setup_refresh_cache_hits: usize,' + "`n" + '    setup_refresh_total_ms: f64,' + "`n" + '}'
+          )
+          $oldWarm = @'
+    // Provision the sandbox once before measuring so create/update/delete do not include
+    // first-run account/setup creation. The measured elevated path still performs its normal
+    // per-helper setup refresh.
+    fs.get_metadata(&cwd, GetMetadataOptions::default(), Some(&sandbox))
+        .await
+        .context("warm up Windows sandbox")?;
+'@
+          $newWarm = @'
+    // Provision in a separate process for P1 measurement so the measured process starts with
+    // persistent setup present but an empty process-local setup-refresh success cache.
+    if std::env::var_os("CODEX_P1_SKIP_WARMUP").is_none() {
+        fs.get_metadata(&cwd, GetMetadataOptions::default(), Some(&sandbox))
+            .await
+            .context("warm up Windows sandbox")?;
+    }
+'@
+          if (-not $text.Contains($oldWarm)) { throw 'warmup patch point not found' }
+          $text = $text.Replace($oldWarm, $newWarm)
+          $text = $text.Replace(
+            '        setup_refreshes: stats.setup_refreshes,' + "`n" + '        setup_refresh_total_ms: stats.setup_refresh_total_ms,',
+            '        setup_refreshes: stats.setup_refreshes,' + "`n" + '        setup_refresh_cache_hits: stats.setup_refresh_cache_hits,' + "`n" + '        setup_refresh_total_ms: stats.setup_refresh_total_ms,'
+          )
+          $oldSummary = @'
+        let Some((_, completion)) = line.split_once("setup refresh: completed success=") else {
+            continue;
+        };
+        stats.setup_refreshes += 1;
+        if let Some((_, elapsed)) = completion.split_once(" elapsed_ms=")
+            && let Some(value) = elapsed.split_whitespace().next()
+            && let Ok(value) = value.parse::<f64>()
+        {
+            stats.setup_refresh_total_ms += value;
+        }
+'@
+          $newSummary = @'
+        if line.contains("setup refresh: spawning ") {
+            stats.setup_refreshes += 1;
+        }
+        if line.contains("setup refresh cache: hit") {
+            stats.setup_refresh_cache_hits += 1;
+        }
+        if let Some((_, completion)) = line.split_once("setup refresh: completed success=")
+            && let Some((_, elapsed)) = completion.split_once(" elapsed_ms=")
+            && let Some(value) = elapsed.split_whitespace().next()
+            && let Ok(value) = value.parse::<f64>()
+        {
+            stats.setup_refresh_total_ms += value;
+        }
+'@
+          if (-not $text.Contains($oldSummary)) { throw 'summary patch point not found' }
+          $text = $text.Replace($oldSummary, $newSummary)
+          Set-Content -NoNewline -Encoding utf8 $path $text
+          cargo fmt --all -- --check
+
+      - name: Build Windows sandbox helper binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build -p codex-windows-sandbox --bin codex-windows-sandbox-setup --bin codex-command-runner
+          $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
+          $debugDir = Join-Path $metadata.target_directory 'debug'
+          $debugDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Prepare isolated sandbox home
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $codexHome = Join-Path $env:RUNNER_TEMP 'codex-p1-setup-refresh-home'
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $codexHome
+          New-Item -ItemType Directory -Force -Path $codexHome | Out-Null
+          "CODEX_HOME=$codexHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Phase A persistent provisioning process
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & cargo test -p codex-core --test windows_apply_patch_baseline -- --nocapture --test-threads=1 *> $null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Phase B fresh process create update delete measurement
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:CODEX_P1_SKIP_WARMUP = '1'
+          $artifactDir = Join-Path $env:RUNNER_TEMP 'windows-p1-setup-refresh-measurement'
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $rawLog = Join-Path $artifactDir 'measurement-raw.log'
+
+          & cargo test -p codex-core --test windows_apply_patch_baseline -- --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $rawLog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $current = $null
+          $requestCounts = @{}
+          $helperMs = @{}
+          $results = [System.Collections.Generic.List[object]]::new()
+          foreach ($line in Get-Content $rawLog) {
+            if ($line -match 'APPLY_PATCH_BASELINE_BEGIN (?<name>create|update|delete)') {
+              $current = $Matches.name
+              $requestCounts[$current] = 0
+              $helperMs[$current] = 0.0
+              continue
+            }
+            if ($null -ne $current -and $line.Contains('filesystem sandbox helper invocation started')) {
+              $requestCounts[$current]++
+              continue
+            }
+            if ($null -ne $current -and $line.Contains('filesystem sandbox helper invocation completed') -and $line -match 'elapsed_ms=(?<ms>[0-9.]+)') {
+              $helperMs[$current] += [double]$Matches.ms
+              continue
+            }
+            if ($line -match 'APPLY_PATCH_BASELINE_RESULT (?<json>\{.*\})') {
+              $row = $Matches.json | ConvertFrom-Json
+              $row | Add-Member -NotePropertyName fs_requests -NotePropertyValue $requestCounts[$row.operation]
+              $row | Add-Member -NotePropertyName fs_helper_total_ms -NotePropertyValue $helperMs[$row.operation]
+              $results.Add($row)
+              continue
+            }
+            if ($line -match 'APPLY_PATCH_BASELINE_END (?<name>create|update|delete)') { $current = $null }
+          }
+          if ($results.Count -ne 3) { throw "expected three rows, found $($results.Count)" }
+          foreach ($row in $results) {
+            if ($row.fs_requests -ne $row.fs_helper_starts) { throw "$($row.operation): request/helper mismatch" }
+          }
+          $aggregate = [pscustomobject]@{
+            fs_requests = ($results | Measure-Object fs_requests -Sum).Sum
+            fs_helper_starts = ($results | Measure-Object fs_helper_starts -Sum).Sum
+            setup_refreshes = ($results | Measure-Object setup_refreshes -Sum).Sum
+            setup_refresh_cache_hits = ($results | Measure-Object setup_refresh_cache_hits -Sum).Sum
+            apply_patch_total_ms = ($results | Measure-Object elapsed_ms -Sum).Sum
+            fs_helper_total_ms = ($results | Measure-Object fs_helper_total_ms -Sum).Sum
+            setup_refresh_total_ms = ($results | Measure-Object setup_refresh_total_ms -Sum).Sum
+          }
+          $evidence = [pscustomobject]@{ rows = $results; aggregate = $aggregate }
+          $json = $evidence | ConvertTo-Json -Depth 6 -Compress
+          "P1_MEASUREMENT_JSON=$json"
+          $evidence | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 (Join-Path $artifactDir 'measurement.json')
+
+          Add-Content $env:GITHUB_STEP_SUMMARY '| operation | total ms | fs requests | helper starts | helper ms | actual refreshes | cache hits | refresh-path ms |'
+          Add-Content $env:GITHUB_STEP_SUMMARY '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'
+          foreach ($row in $results) {
+            Add-Content $env:GITHUB_STEP_SUMMARY ("| {0} | {1:N3} | {2} | {3} | {4:N3} | {5} | {6} | {7:N3} |" -f $row.operation,$row.elapsed_ms,$row.fs_requests,$row.fs_helper_starts,$row.fs_helper_total_ms,$row.setup_refreshes,$row.setup_refresh_cache_hits,$row.setup_refresh_total_ms)
+          }
+          Add-Content $env:GITHUB_STEP_SUMMARY "Aggregate: $json"
+
+      - name: Upload measurement evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-p1-setup-refresh-${{ github.sha }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/windows-p1-setup-refresh-measurement
+            ${{ env.CODEX_HOME }}/.sandbox/sandbox.*.log
