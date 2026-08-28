@@ -10,20 +10,40 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  validate-reworked-batch:
+  finalize-feature-branch:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Build and validate current-architecture batch implementation
+      - name: Rebuild on latest main, validate, and push
         shell: bash
         run: |
           set -euxo pipefail
-          git fetch origin 8118620cc9744e3f7fdf17decd3238164f818b8e
+
+          mkdir -p /tmp/batch-scripts
+          cp .github/tmp-apply-patch-batch-rework.py /tmp/batch-scripts/
+          cp .github/tmp-fix-batch-engine.py /tmp/batch-scripts/
+          cp .github/tmp-fix-batch-directory-identity.py /tmp/batch-scripts/
+          cp .github/tmp-fix-windows-identity-comments.py /tmp/batch-scripts/
+          cp .github/tmp-finish-apply-patch-batch.py /tmp/batch-scripts/
+          cp .github/tmp-add-batch-integration-tests.py /tmp/batch-scripts/
+          cp .github/tmp-add-windows-batch-reparse-test.py /tmp/batch-scripts/
+          tar -czf /tmp/batch-source.tgz \
+            codex-rs/apply-patch/src/prepared.rs \
+            codex-rs/apply-patch/src/batch_tests.rs \
+            codex-rs/exec-server/src/file_mutation_batch.rs \
+            codex-rs/exec-server/src/file_mutation_batch_tests.rs \
+            codex-rs/exec-server-protocol/tests/fs_mutate_batch.rs
+
+          git fetch origin main 8118620cc9744e3f7fdf17decd3238164f818b8e
+          git checkout -B perf/apply-patch-batch-mutation origin/main
+          git clean -fd
+          tar -xzf /tmp/batch-source.tgz
+
           parent="$(git rev-parse 8118620cc9744e3f7fdf17decd3238164f818b8e^)"
           git diff "$parent" 8118620cc9744e3f7fdf17decd3238164f818b8e -- \
             codex-rs/apply-patch/src/file_update.rs \
@@ -39,11 +59,13 @@ jobs:
             codex-rs/file-system/src/lib.rs \
             > /tmp/legacy-wiring.patch
           git apply --3way /tmp/legacy-wiring.patch
+
           git diff "$parent" 8118620cc9744e3f7fdf17decd3238164f818b8e -- \
             codex-rs/apply-patch/tests/suite/tool.rs \
             codex-rs/apply-patch/tests/fixtures/scenarios/015_failure_after_partial_success_leaves_changes/expected/created.txt \
             > /tmp/legacy-tests.patch
           git apply --3way /tmp/legacy-tests.patch
+
           python3 - <<'PY'
           from pathlib import Path
           p = Path('codex-rs/exec-server-protocol/src/protocol.rs')
@@ -53,19 +75,22 @@ jobs:
               pos = s.rfind(needle)
               s = s[:pos] + 'use codex_file_system::{FileSystemSandboxContext};' + s[pos + len(needle):]
               p.write_text(s)
-          p = Path('.github/tmp-apply-patch-batch-rework.py')
+
+          p = Path('/tmp/batch-scripts/tmp-apply-patch-batch-rework.py')
           s = p.read_text()
           s = s.replace('"        let sandbox = require_platform_sandbox(sandbox)?;\\n        let possibly_mutated_paths = batch\\n",', '"        let possibly_mutated_paths = batch\\n",', 1)
           s = s.replace('"        let sandbox = require_platform_sandbox(sandbox)?;\\n        let follow_symlinks = batch.follow_symlinks;\\n        let possibly_mutated_paths = batch\\n",', '"        let follow_symlinks = batch.follow_symlinks;\\n        let possibly_mutated_paths = batch\\n",', 1)
           p.write_text(s)
           PY
-          python3 .github/tmp-apply-patch-batch-rework.py
-          python3 .github/tmp-fix-batch-engine.py
-          python3 .github/tmp-fix-batch-directory-identity.py
-          python3 .github/tmp-fix-windows-identity-comments.py
-          python3 .github/tmp-finish-apply-patch-batch.py
-          python3 .github/tmp-add-batch-integration-tests.py
-          python3 .github/tmp-add-windows-batch-reparse-test.py
+
+          python3 /tmp/batch-scripts/tmp-apply-patch-batch-rework.py
+          python3 /tmp/batch-scripts/tmp-fix-batch-engine.py
+          python3 /tmp/batch-scripts/tmp-fix-batch-directory-identity.py
+          python3 /tmp/batch-scripts/tmp-fix-windows-identity-comments.py
+          python3 /tmp/batch-scripts/tmp-finish-apply-patch-batch.py
+          python3 /tmp/batch-scripts/tmp-add-batch-integration-tests.py
+          python3 /tmp/batch-scripts/tmp-add-windows-batch-reparse-test.py
+
           cd codex-rs
           cargo fmt --all
           cargo fmt --all -- --check
@@ -77,4 +102,14 @@ jobs:
           cargo test -p codex-exec-server --test file_system_unix file_system_mutate_batch_round_trips_unsandboxed_and_sandboxed
           cargo test -p codex-core apply_patch
           cargo clippy -p codex-file-system -p codex-exec-server-protocol -p codex-exec-server -p codex-apply-patch --all-targets -- -D warnings
+          cd ..
+
           git diff --check
+          test -z "$(git diff --name-only origin/main -- .github)"
+          git add codex-rs
+          git diff --cached --check
+          test -n "$(git diff --cached --name-only)"
+          git config user.name hirsaeki
+          git config user.email 5356955+hirsaeki@users.noreply.github.com
+          git commit -m "Batch apply_patch filesystem mutations"
+          git push origin HEAD:perf/apply-patch-batch-mutation
