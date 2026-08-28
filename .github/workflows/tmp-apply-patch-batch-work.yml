@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Diagnose sandbox batch runtime boundary
+      - name: Diagnose sandbox batch primitive boundary
         shell: bash
         run: |
           set -euxo pipefail
@@ -34,7 +34,7 @@ jobs:
           cp .github/tmp-finish-apply-patch-batch.py /tmp/batch-scripts/
           cp .github/tmp-add-batch-integration-tests.py /tmp/batch-scripts/
           cp .github/tmp-add-windows-batch-reparse-test.py /tmp/batch-scripts/
-          cp .github/tmp-diag-direct-batch-no-spawn.py /tmp/batch-scripts/
+          cp .github/tmp-diag-batch-sandbox-matrix.py /tmp/batch-scripts/
           tar -czf /tmp/batch-source.tgz \
             codex-rs/apply-patch/src/prepared.rs \
             codex-rs/apply-patch/src/batch_tests.rs \
@@ -95,8 +95,8 @@ jobs:
           python3 /tmp/batch-scripts/tmp-finish-apply-patch-batch.py
           python3 /tmp/batch-scripts/tmp-add-batch-integration-tests.py
           python3 /tmp/batch-scripts/tmp-add-windows-batch-reparse-test.py
-          python3 /tmp/batch-scripts/tmp-diag-direct-batch-no-spawn.py
+          python3 /tmp/batch-scripts/tmp-diag-batch-sandbox-matrix.py
 
           cd codex-rs
           cargo fmt --all
-          cargo test -p codex-exec-server --test file_system_unix file_system_mutate_batch_round_trips_unsandboxed_and_sandboxed -- --nocapture
+          cargo test -p codex-exec-server --test file_system_unix file_system_mutate_batch_sandbox_diagnostic_matrix -- --nocapture
