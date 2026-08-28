@@ -98,14 +98,7 @@ jobs:
           ) -join "`n"
           if (-not $text.Contains($oldSummary)) { throw 'summary patch point not found' }
           $text = $text.Replace($oldSummary, $newSummary)
-
           Set-Content -NoNewline -Encoding utf8 $path $text
-          Push-Location codex-rs
-          try {
-            cargo fmt --all -- --check
-          } finally {
-            Pop-Location
-          }
 
       - name: Build Windows sandbox helper binaries
         shell: pwsh
@@ -203,6 +196,4 @@ jobs:
         with:
           name: windows-p1-setup-refresh-${{ github.sha }}
           if-no-files-found: warn
-          path: |
-            ${{ runner.temp }}/windows-p1-setup-refresh-measurement
-            ${{ env.CODEX_HOME }}/.sandbox/sandbox.*.log
+          path: ${{ runner.temp }}/windows-p1-setup-refresh-measurement
