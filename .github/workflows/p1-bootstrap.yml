@@ -25,10 +25,12 @@ jobs:
         run: cargo fmt --all
       - name: Run setup cache tests
         working-directory: codex-rs
-        run: cargo test -p codex-windows-sandbox --lib setup::tests::
+        run: >-
+          cargo test -p codex-windows-sandbox --lib setup::tests::
       - name: Run stale recovery invalidation test
         working-directory: codex-rs
-        run: cargo test -p codex-windows-sandbox --lib identity::tests::stale_sandbox_users_invalidate_setup_refresh_success_cache
+        run: >-
+          cargo test -p codex-windows-sandbox --lib identity::tests::stale_sandbox_users_invalidate_setup_refresh_success_cache
       - name: Commit implementation and remove bootstrap files
         shell: bash
         run: |
