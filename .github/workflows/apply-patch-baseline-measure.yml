@@ -34,77 +34,109 @@ jobs:
           "head_sha=$($run.head_sha)" >> $env:GITHUB_OUTPUT
           Write-Host "Using baseline build run $($run.id) for $($run.head_sha)"
 
-      - name: Download instrumented binaries
+      - name: Download reusable baseline binaries
         uses: actions/download-artifact@v4
         with:
-          name: apply-patch-baseline-${{ steps.build.outputs.head_sha }}
+          name: windows-apply-patch-baseline-bin-${{ steps.build.outputs.head_sha }}
           path: ${{ runner.temp }}/apply-patch-baseline-bin
           repository: ${{ github.repository }}
           run-id: ${{ steps.build.outputs.run_id }}
           github-token: ${{ github.token }}
 
-      - name: Warm Windows sandbox setup
+      - name: Prepare isolated sandbox home
         shell: pwsh
-        env:
-          CODEX_HOME: ${{ runner.temp }}/apply-patch-baseline-codex-home
-          CODEX_BASELINE_CODEX_EXE: ${{ runner.temp }}/apply-patch-baseline-bin/codex.exe
         run: |
-          $warm = Join-Path $env:RUNNER_TEMP 'apply-patch-baseline-warm'
-          New-Item -ItemType Directory -Force -Path $warm | Out-Null
-          & "$env:RUNNER_TEMP/apply-patch-baseline-bin/apply_patch_sandbox_baseline.exe" $warm *> "$env:RUNNER_TEMP/warmup.log"
-          if ($LASTEXITCODE -ne 0) {
-            Get-Content "$env:RUNNER_TEMP/warmup.log"
-            throw "warmup failed with exit code $LASTEXITCODE"
-          }
-          Remove-Item "$env:RUNNER_TEMP/warmup.log" -Force
-          Get-ChildItem -Path (Join-Path $env:CODEX_HOME '.sandbox') -Filter 'sandbox.*.log' -ErrorAction SilentlyContinue | Remove-Item -Force
+          $codexHome = Join-Path $env:RUNNER_TEMP 'codex-apply-patch-baseline-home'
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $codexHome
+          New-Item -ItemType Directory -Force -Path $codexHome | Out-Null
+          "CODEX_HOME=$codexHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$env:RUNNER_TEMP\apply-patch-baseline-bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Measure create update delete
+      - name: Measure create update delete without rebuilding
         shell: pwsh
-        env:
-          CODEX_HOME: ${{ runner.temp }}/apply-patch-baseline-codex-home
-          CODEX_BASELINE_CODEX_EXE: ${{ runner.temp }}/apply-patch-baseline-bin/codex.exe
         run: |
-          $workspace = Join-Path $env:RUNNER_TEMP 'apply-patch-baseline-workspace'
-          New-Item -ItemType Directory -Force -Path $workspace | Out-Null
-          $output = Join-Path $env:RUNNER_TEMP 'apply-patch-baseline-output.log'
-          & "$env:RUNNER_TEMP/apply-patch-baseline-bin/apply_patch_sandbox_baseline.exe" $workspace 2>&1 | Tee-Object -FilePath $output
-          if ($LASTEXITCODE -ne 0) {
-            throw "baseline measurement failed with exit code $LASTEXITCODE"
+          $ErrorActionPreference = 'Stop'
+          $artifactDir = Join-Path $env:RUNNER_TEMP 'windows-apply-patch-baseline'
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $rawLog = Join-Path $artifactDir 'baseline-raw.log'
+          $testExe = Join-Path $env:RUNNER_TEMP 'apply-patch-baseline-bin\windows_apply_patch_baseline.exe'
+
+          & $testExe --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $rawLog
+          $testExit = $LASTEXITCODE
+
+          $sandboxLogDir = Join-Path $env:CODEX_HOME '.sandbox'
+          if (Test-Path $sandboxLogDir) {
+            Get-ChildItem -Path $sandboxLogDir -Filter 'sandbox.*.log' -ErrorAction SilentlyContinue |
+              Copy-Item -Destination $artifactDir -Force
+          }
+          if ($testExit -ne 0) {
+            exit $testExit
           }
 
-      - name: Collect sandbox logs and metadata
-        if: always()
-        shell: pwsh
-        env:
-          CODEX_HOME: ${{ runner.temp }}/apply-patch-baseline-codex-home
-          BUILD_SHA: ${{ steps.build.outputs.head_sha }}
-          BUILD_RUN_ID: ${{ steps.build.outputs.run_id }}
-        run: |
-          $result = Join-Path $env:RUNNER_TEMP 'apply-patch-baseline-result'
-          New-Item -ItemType Directory -Force -Path $result | Out-Null
-          if (Test-Path "$env:RUNNER_TEMP/apply-patch-baseline-output.log") {
-            Copy-Item "$env:RUNNER_TEMP/apply-patch-baseline-output.log" $result/
+          $current = $null
+          $requestCounts = @{}
+          $breakdowns = @{}
+          $results = [System.Collections.Generic.List[object]]::new()
+          foreach ($line in Get-Content $rawLog) {
+            if ($line -match 'APPLY_PATCH_BASELINE_BEGIN (?<name>create|update|delete)') {
+              $current = $Matches.name
+              $requestCounts[$current] = 0
+              $breakdowns[$current] = @{}
+              continue
+            }
+            if ($null -ne $current -and $line.Contains('filesystem sandbox helper invocation started')) {
+              $fsOperation = $null
+              if ($line -match 'operation="(?<operation>[^"]+)"') {
+                $fsOperation = $Matches.operation
+              } elseif ($line -match 'operation=(?<operation>\S+)') {
+                $fsOperation = $Matches.operation.Trim('"')
+              }
+              if ($null -ne $fsOperation) {
+                $requestCounts[$current]++
+                if (-not $breakdowns[$current].ContainsKey($fsOperation)) {
+                  $breakdowns[$current][$fsOperation] = 0
+                }
+                $breakdowns[$current][$fsOperation]++
+              }
+              continue
+            }
+            if ($line -match 'APPLY_PATCH_BASELINE_RESULT (?<json>\{.*\})') {
+              $row = $Matches.json | ConvertFrom-Json
+              $row | Add-Member -NotePropertyName fs_requests -NotePropertyValue $requestCounts[$row.operation]
+              $row | Add-Member -NotePropertyName fs_operations -NotePropertyValue $breakdowns[$row.operation]
+              $results.Add($row)
+            }
           }
-          $sandboxDir = Join-Path $env:CODEX_HOME '.sandbox'
-          if (Test-Path $sandboxDir) {
-            Get-ChildItem $sandboxDir -Filter 'sandbox.*.log' | Copy-Item -Destination $result
+          if ($results.Count -ne 3) {
+            throw "expected three baseline rows, found $($results.Count)"
           }
+          foreach ($row in $results) {
+            if ($row.fs_requests -ne $row.fs_helper_starts) {
+              throw "$($row.operation): fs request count $($row.fs_requests) did not match helper starts $($row.fs_helper_starts)"
+            }
+          }
+          $results | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 (Join-Path $artifactDir 'baseline.json')
           @(
-            "build_sha=$env:BUILD_SHA"
-            "build_run_id=$env:BUILD_RUN_ID"
+            "build_sha=${{ steps.build.outputs.head_sha }}"
+            "build_run_id=${{ steps.build.outputs.run_id }}"
             "runner_os=$env:RUNNER_OS"
             "runner_arch=$env:RUNNER_ARCH"
             "image_os=$env:ImageOS"
             "image_version=$env:ImageVersion"
             "windows_sandbox_level=elevated"
-          ) | Set-Content (Join-Path $result 'metadata.txt')
+          ) | Set-Content (Join-Path $artifactDir 'metadata.txt')
+
+          Add-Content $env:GITHUB_STEP_SUMMARY '| operation | total apply_patch ms | fs requests | fs-helper starts | setup refreshes | setup-refresh total ms |'
+          Add-Content $env:GITHUB_STEP_SUMMARY '| --- | ---: | ---: | ---: | ---: | ---: |'
+          foreach ($row in $results) {
+            Add-Content $env:GITHUB_STEP_SUMMARY ("| {0} | {1:N3} | {2} | {3} | {4} | {5:N3} |" -f $row.operation, $row.elapsed_ms, $row.fs_requests, $row.fs_helper_starts, $row.setup_refreshes, $row.setup_refresh_total_ms)
+          }
 
       - name: Upload baseline measurement
-        if: always()
-        uses: actions/upload-artifact@v4
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: apply-patch-baseline-measurement-${{ steps.build.outputs.head_sha }}
-          path: ${{ runner.temp }}/apply-patch-baseline-result
-          if-no-files-found: error
+          name: windows-apply-patch-baseline-measurement-${{ steps.build.outputs.head_sha }}
+          path: ${{ runner.temp }}/windows-apply-patch-baseline
+          if-no-files-found: warn
           retention-days: 14
