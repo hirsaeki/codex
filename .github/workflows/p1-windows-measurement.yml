@@ -32,69 +32,80 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $path = 'codex-rs/core/tests/windows_apply_patch_baseline.rs'
-          $text = Get-Content -Raw $path
-          $text = $text.Replace(
-            'struct SandboxLogStats {' + "`n" + '    helper_starts: usize,' + "`n" + '    setup_refreshes: usize,' + "`n" + '    setup_refresh_total_ms: f64,' + "`n" + '}',
-            'struct SandboxLogStats {' + "`n" + '    helper_starts: usize,' + "`n" + '    setup_refreshes: usize,' + "`n" + '    setup_refresh_cache_hits: usize,' + "`n" + '    setup_refresh_total_ms: f64,' + "`n" + '}'
-          )
-          $text = $text.Replace(
-            '    setup_refreshes: usize,' + "`n" + '    setup_refresh_total_ms: f64,' + "`n" + '}',
-            '    setup_refreshes: usize,' + "`n" + '    setup_refresh_cache_hits: usize,' + "`n" + '    setup_refresh_total_ms: f64,' + "`n" + '}'
-          )
-          $oldWarm = @'
-    // Provision the sandbox once before measuring so create/update/delete do not include
-    // first-run account/setup creation. The measured elevated path still performs its normal
-    // per-helper setup refresh.
-    fs.get_metadata(&cwd, GetMetadataOptions::default(), Some(&sandbox))
-        .await
-        .context("warm up Windows sandbox")?;
-'@
-          $newWarm = @'
-    // Provision in a separate process for P1 measurement so the measured process starts with
-    // persistent setup present but an empty process-local setup-refresh success cache.
-    if std::env::var_os("CODEX_P1_SKIP_WARMUP").is_none() {
-        fs.get_metadata(&cwd, GetMetadataOptions::default(), Some(&sandbox))
-            .await
-            .context("warm up Windows sandbox")?;
-    }
-'@
+          $text = (Get-Content -Raw $path).Replace("`r`n", "`n")
+
+          $old = 'struct SandboxLogStats {' + "`n" + '    helper_starts: usize,' + "`n" + '    setup_refreshes: usize,' + "`n" + '    setup_refresh_total_ms: f64,' + "`n" + '}'
+          $new = 'struct SandboxLogStats {' + "`n" + '    helper_starts: usize,' + "`n" + '    setup_refreshes: usize,' + "`n" + '    setup_refresh_cache_hits: usize,' + "`n" + '    setup_refresh_total_ms: f64,' + "`n" + '}'
+          if (-not $text.Contains($old)) { throw 'SandboxLogStats patch point not found' }
+          $text = $text.Replace($old, $new)
+
+          $old = '    setup_refreshes: usize,' + "`n" + '    setup_refresh_total_ms: f64,' + "`n" + '}'
+          $new = '    setup_refreshes: usize,' + "`n" + '    setup_refresh_cache_hits: usize,' + "`n" + '    setup_refresh_total_ms: f64,' + "`n" + '}'
+          if (-not $text.Contains($old)) { throw 'BaselineResult patch point not found' }
+          $text = $text.Replace($old, $new)
+
+          $oldWarm = @(
+            '    // Provision the sandbox once before measuring so create/update/delete do not include'
+            '    // first-run account/setup creation. The measured elevated path still performs its normal'
+            '    // per-helper setup refresh.'
+            '    fs.get_metadata(&cwd, GetMetadataOptions::default(), Some(&sandbox))'
+            '        .await'
+            '        .context("warm up Windows sandbox")?;'
+          ) -join "`n"
+          $newWarm = @(
+            '    // Provision in a separate process for P1 measurement so the measured process starts with'
+            '    // persistent setup present but an empty process-local setup-refresh success cache.'
+            '    if std::env::var_os("CODEX_P1_SKIP_WARMUP").is_none() {'
+            '        fs.get_metadata(&cwd, GetMetadataOptions::default(), Some(&sandbox))'
+            '            .await'
+            '            .context("warm up Windows sandbox")?;'
+            '    }'
+          ) -join "`n"
           if (-not $text.Contains($oldWarm)) { throw 'warmup patch point not found' }
           $text = $text.Replace($oldWarm, $newWarm)
-          $text = $text.Replace(
-            '        setup_refreshes: stats.setup_refreshes,' + "`n" + '        setup_refresh_total_ms: stats.setup_refresh_total_ms,',
-            '        setup_refreshes: stats.setup_refreshes,' + "`n" + '        setup_refresh_cache_hits: stats.setup_refresh_cache_hits,' + "`n" + '        setup_refresh_total_ms: stats.setup_refresh_total_ms,'
-          )
-          $oldSummary = @'
-        let Some((_, completion)) = line.split_once("setup refresh: completed success=") else {
-            continue;
-        };
-        stats.setup_refreshes += 1;
-        if let Some((_, elapsed)) = completion.split_once(" elapsed_ms=")
-            && let Some(value) = elapsed.split_whitespace().next()
-            && let Ok(value) = value.parse::<f64>()
-        {
-            stats.setup_refresh_total_ms += value;
-        }
-'@
-          $newSummary = @'
-        if line.contains("setup refresh: spawning ") {
-            stats.setup_refreshes += 1;
-        }
-        if line.contains("setup refresh cache: hit") {
-            stats.setup_refresh_cache_hits += 1;
-        }
-        if let Some((_, completion)) = line.split_once("setup refresh: completed success=")
-            && let Some((_, elapsed)) = completion.split_once(" elapsed_ms=")
-            && let Some(value) = elapsed.split_whitespace().next()
-            && let Ok(value) = value.parse::<f64>()
-        {
-            stats.setup_refresh_total_ms += value;
-        }
-'@
+
+          $old = '        setup_refreshes: stats.setup_refreshes,' + "`n" + '        setup_refresh_total_ms: stats.setup_refresh_total_ms,'
+          $new = '        setup_refreshes: stats.setup_refreshes,' + "`n" + '        setup_refresh_cache_hits: stats.setup_refresh_cache_hits,' + "`n" + '        setup_refresh_total_ms: stats.setup_refresh_total_ms,'
+          if (-not $text.Contains($old)) { throw 'result initializer patch point not found' }
+          $text = $text.Replace($old, $new)
+
+          $oldSummary = @(
+            '        let Some((_, completion)) = line.split_once("setup refresh: completed success=") else {'
+            '            continue;'
+            '        };'
+            '        stats.setup_refreshes += 1;'
+            '        if let Some((_, elapsed)) = completion.split_once(" elapsed_ms=")'
+            '            && let Some(value) = elapsed.split_whitespace().next()'
+            '            && let Ok(value) = value.parse::<f64>()'
+            '        {'
+            '            stats.setup_refresh_total_ms += value;'
+            '        }'
+          ) -join "`n"
+          $newSummary = @(
+            '        if line.contains("setup refresh: spawning ") {'
+            '            stats.setup_refreshes += 1;'
+            '        }'
+            '        if line.contains("setup refresh cache: hit") {'
+            '            stats.setup_refresh_cache_hits += 1;'
+            '        }'
+            '        if let Some((_, completion)) = line.split_once("setup refresh: completed success=")'
+            '            && let Some((_, elapsed)) = completion.split_once(" elapsed_ms=")'
+            '            && let Some(value) = elapsed.split_whitespace().next()'
+            '            && let Ok(value) = value.parse::<f64>()'
+            '        {'
+            '            stats.setup_refresh_total_ms += value;'
+            '        }'
+          ) -join "`n"
           if (-not $text.Contains($oldSummary)) { throw 'summary patch point not found' }
           $text = $text.Replace($oldSummary, $newSummary)
+
           Set-Content -NoNewline -Encoding utf8 $path $text
-          cargo fmt --all -- --check
+          Push-Location codex-rs
+          try {
+            cargo fmt --all -- --check
+          } finally {
+            Pop-Location
+          }
 
       - name: Build Windows sandbox helper binaries
         shell: pwsh
