@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 #[cfg(any(windows, test))]
 use std::time::Duration;
+use std::time::Instant;
 
 use codex_exec_server_protocol::JSONRPCErrorError;
 use codex_protocol::models::PermissionProfile;
@@ -34,6 +35,17 @@ use crate::fs_helper::FsHelperPayload;
 use crate::fs_helper::FsHelperRequest;
 use crate::fs_helper::FsHelperResponse;
 use crate::local_file_system::current_sandbox_cwd;
+use crate::protocol::CAPABILITY_ROOTS_DISCOVER_METHOD;
+use crate::protocol::FS_CANONICALIZE_METHOD;
+use crate::protocol::FS_COPY_METHOD;
+use crate::protocol::FS_CREATE_DIRECTORY_METHOD;
+use crate::protocol::FS_GET_METADATA_METHOD;
+use crate::protocol::FS_OPEN_METHOD;
+use crate::protocol::FS_READ_DIRECTORY_METHOD;
+use crate::protocol::FS_READ_FILE_METHOD;
+use crate::protocol::FS_REMOVE_METHOD;
+use crate::protocol::FS_WALK_METHOD;
+use crate::protocol::FS_WRITE_FILE_METHOD;
 use crate::rpc::internal_error;
 use crate::rpc::invalid_request;
 
@@ -78,8 +90,18 @@ impl FileSystemSandboxRunner {
         request: FsHelperRequest,
     ) -> Result<FsHelperPayload, JSONRPCErrorError> {
         let command = self.sandbox_command(sandbox)?;
+        let operation = fs_helper_operation(&request);
         let request_json = serde_json::to_vec(&request).map_err(json_error)?;
-        run_command(command, request_json).await
+        let started_at = Instant::now();
+        tracing::debug!(operation, "filesystem sandbox helper invocation started");
+        let result = run_command(command, request_json).await;
+        tracing::debug!(
+            operation,
+            success = result.is_ok(),
+            elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0,
+            "filesystem sandbox helper invocation completed"
+        );
+        result
     }
 
     pub(crate) fn sandbox_command(
@@ -314,6 +336,22 @@ fn bazel_bwrap_env_key_is_allowed(_key: &str) -> bool {
     false
 }
 
+fn fs_helper_operation(request: &FsHelperRequest) -> &'static str {
+    match request {
+        FsHelperRequest::DiscoverCapabilityRoots(_) => CAPABILITY_ROOTS_DISCOVER_METHOD,
+        FsHelperRequest::Open(_) => FS_OPEN_METHOD,
+        FsHelperRequest::ReadFile(_) => FS_READ_FILE_METHOD,
+        FsHelperRequest::WriteFile(_) => FS_WRITE_FILE_METHOD,
+        FsHelperRequest::CreateDirectory(_) => FS_CREATE_DIRECTORY_METHOD,
+        FsHelperRequest::GetMetadata(_) => FS_GET_METADATA_METHOD,
+        FsHelperRequest::Canonicalize(_) => FS_CANONICALIZE_METHOD,
+        FsHelperRequest::ReadDirectory(_) => FS_READ_DIRECTORY_METHOD,
+        FsHelperRequest::Walk(_) => FS_WALK_METHOD,
+        FsHelperRequest::Remove(_) => FS_REMOVE_METHOD,
+        FsHelperRequest::Copy(_) => FS_COPY_METHOD,
+    }
+}
+
 async fn run_command(
     command: SandboxExecRequest,
     request_json: Vec<u8>,
@@ -515,15 +553,36 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use crate::ExecServerRuntimePaths;
+    use crate::fs_helper::FsHelperRequest;
+    use crate::protocol::FS_WRITE_FILE_METHOD;
+    use crate::protocol::FsWriteFileParams;
 
     use super::FileSystemSandboxRunner;
     use super::SandboxCwd;
     use super::add_helper_runtime_permissions;
+    use super::fs_helper_operation;
     use super::helper_env;
     use super::helper_env_from_vars;
     use super::helper_env_key_is_allowed;
     use super::helper_read_roots;
     use super::sandbox_cwd;
+
+    #[test]
+    fn helper_operation_label_uses_protocol_method_name() {
+        let path = PathUri::from_abs_path(
+            &AbsolutePathBuf::from_absolute_path(std::env::temp_dir().as_path())
+                .expect("absolute temp dir")
+                .join("instrumentation.txt"),
+        );
+        let request = FsHelperRequest::WriteFile(FsWriteFileParams {
+            path,
+            data_base64: String::new(),
+            follow_symlinks: None,
+            sandbox: None,
+        });
+
+        assert_eq!(fs_helper_operation(&request), FS_WRITE_FILE_METHOD);
+    }
 
     #[test]
     fn helper_permissions_enable_minimal_reads_for_restricted_profile() {
