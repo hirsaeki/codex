@@ -3,7 +3,6 @@ from pathlib import Path
 path = Path("codex-rs/exec-server/src/file_mutation_batch.rs")
 text = path.read_text()
 
-text = text.replace("use crate::GetMetadataOptions;\n", "", 1)
 text = text.replace(
     "AbsolutePathBuf::from_absolute_path(path)?",
     "AbsolutePathBuf::from_absolute_path(path.clone())?",
