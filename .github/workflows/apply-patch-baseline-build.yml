@@ -1,0 +1,59 @@
+name: apply-patch baseline build
+
+on:
+  push:
+    branches:
+      - perf/instrument-apply-patch-sandbox
+    paths:
+      - '.github/scripts/instrument_apply_patch_baseline.py'
+      - '.github/workflows/apply-patch-baseline-build.yml'
+      - '.github/workflows/apply-patch-baseline-measure.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-baseline:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - name: Apply baseline-only instrumentation
+        working-directory: .
+        run: python .github/scripts/instrument_apply_patch_baseline.py
+      - name: Build instrumented Windows baseline binaries
+        shell: pwsh
+        run: >-
+          cargo build --release
+          -p codex-cli
+          -p codex-windows-sandbox
+          -p codex-apply-patch
+          --bin codex
+          --bin codex-windows-sandbox-setup
+          --bin codex-command-runner
+          --bin apply_patch_sandbox_baseline
+      - name: Stage baseline binaries
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'apply-patch-baseline-bin'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item target/release/codex.exe $out/
+          Copy-Item target/release/codex-windows-sandbox-setup.exe $out/
+          Copy-Item target/release/codex-command-runner.exe $out/
+          Copy-Item target/release/apply_patch_sandbox_baseline.exe $out/
+          Set-Content -Path (Join-Path $out 'commit-sha.txt') -Value $env:GITHUB_SHA -NoNewline
+      - name: Upload instrumented baseline binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: apply-patch-baseline-${{ github.sha }}
+          path: ${{ runner.temp }}/apply-patch-baseline-bin
+          if-no-files-found: error
+          retention-days: 14
