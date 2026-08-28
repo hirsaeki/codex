@@ -5,7 +5,8 @@ use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 
 #[test]
-fn fs_mutate_batch_round_trips_with_limits_relevant_fields() -> anyhow::Result<()> {
+fn fs_mutate_batch_round_trips_with_limits_relevant_fields(
+) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::current_dir()?;
     let first = PathUri::from_host_native_path(root.join("first.txt"))?;
     let second = PathUri::from_host_native_path(root.join("second.txt"))?;
