@@ -38,6 +38,14 @@ jobs:
           cargo build -p codex-windows-sandbox --bin codex-windows-sandbox-setup --bin codex-command-runner
           $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
           $debugDir = Join-Path $metadata.target_directory 'debug'
+          $depsDir = Join-Path $debugDir 'deps'
+          New-Item -ItemType Directory -Force -Path $depsDir | Out-Null
+
+          # The integration-test executable runs from target\debug\deps. Elevated sandbox
+          # helper discovery intentionally prefers a sibling command runner, so stage only
+          # this test dependency beside the test executable instead of changing production lookup.
+          Copy-Item -Force (Join-Path $debugDir 'codex-command-runner.exe') (Join-Path $depsDir 'codex-command-runner.exe')
+
           $debugDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "BASELINE_TARGET_DIR=$($metadata.target_directory)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -61,6 +69,12 @@ jobs:
           & cargo test -p codex-core --test windows_apply_patch_baseline -- --nocapture --test-threads=1 2>&1 |
             Tee-Object -FilePath $rawLog
           $cargoExit = $LASTEXITCODE
+
+          $sandboxLogDir = Join-Path $env:CODEX_HOME '.sandbox'
+          if (Test-Path $sandboxLogDir) {
+            Get-ChildItem -Path $sandboxLogDir -Filter 'sandbox.*.log' -ErrorAction SilentlyContinue |
+              Copy-Item -Destination $artifactDir -Force
+          }
           if ($cargoExit -ne 0) {
             exit $cargoExit
           }
@@ -134,6 +148,4 @@ jobs:
         with:
           name: windows-apply-patch-baseline-${{ github.sha }}
           if-no-files-found: warn
-          path: |
-            ${{ runner.temp }}/windows-apply-patch-baseline
-            ${{ env.CODEX_HOME }}/.sandbox/sandbox.*.log
+          path: ${{ runner.temp }}/windows-apply-patch-baseline
