@@ -29,6 +29,7 @@ jobs:
           cp .github/tmp-fix-batch-engine.py /tmp/batch-scripts/
           cp .github/tmp-fix-batch-directory-identity.py /tmp/batch-scripts/
           cp .github/tmp-fix-batch-parent-identity-compile.py /tmp/batch-scripts/
+          cp .github/tmp-fix-batch-test-import.py /tmp/batch-scripts/
           cp .github/tmp-fix-windows-identity-comments.py /tmp/batch-scripts/
           cp .github/tmp-finish-apply-patch-batch.py /tmp/batch-scripts/
           cp .github/tmp-add-batch-integration-tests.py /tmp/batch-scripts/
@@ -88,6 +89,7 @@ jobs:
           python3 /tmp/batch-scripts/tmp-fix-batch-engine.py
           python3 /tmp/batch-scripts/tmp-fix-batch-directory-identity.py
           python3 /tmp/batch-scripts/tmp-fix-batch-parent-identity-compile.py
+          python3 /tmp/batch-scripts/tmp-fix-batch-test-import.py
           python3 /tmp/batch-scripts/tmp-fix-windows-identity-comments.py
           python3 /tmp/batch-scripts/tmp-finish-apply-patch-batch.py
           python3 /tmp/batch-scripts/tmp-add-batch-integration-tests.py
