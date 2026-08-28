@@ -132,3 +132,49 @@ async fn nested_parent_creation_is_rolled_back_after_later_failure() -> io::Resu
         raise RuntimeError("batch nested rollback test anchor mismatch")
     text = text.replace(anchor, test + anchor, 1)
     p.write_text(text)
+
+# Batch transaction semantics intentionally replace the old sequential partial-success
+# expectations: a provably rolled-back failure leaves no committed delta or destination.
+path = "codex-rs/apply-patch/src/lib.rs"
+replace_once(
+    path,
+    "        assert!(!failure.delta().is_exact());\n",
+    '''        assert!(failure.delta().is_exact());
+        assert!(failure.delta().is_empty());
+        assert!(!locked_dir.join("new.txt").exists());
+''',
+)
+replace_once(
+    path,
+    "    async fn test_failed_move_returns_committed_destination_delta() {\n",
+    "    async fn test_failed_move_rolls_back_destination() {\n",
+)
+old = '''        assert!(
+            String::from_utf8(stderr)
+                .unwrap()
+                .contains(&format!("Failed to remove original {}", src.display()))
+        );
+        assert_eq!(
+            failure.delta(),
+            &AppliedPatchDelta::new(
+                vec![AppliedPatchChange {
+                    path: PathUri::from_host_native_path(&dest).expect("absolute destination path"),
+                    change: AppliedPatchFileChange::Add {
+                        content: "line2\\n".to_string(),
+                        overwritten_content: None,
+                    },
+                }],
+                /*exact*/ true,
+            )
+        );
+        assert_eq!(fs::read_to_string(src).unwrap(), "line\\n");
+        assert_eq!(fs::read_to_string(dest).unwrap(), "line2\\n");
+'''
+new = '''        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("filesystem mutation batch failed"), "{stderr}");
+        assert!(failure.delta().is_exact());
+        assert!(failure.delta().is_empty());
+        assert_eq!(fs::read_to_string(src).unwrap(), "line\\n");
+        assert!(!dest.exists());
+'''
+replace_once(path, old, new)
