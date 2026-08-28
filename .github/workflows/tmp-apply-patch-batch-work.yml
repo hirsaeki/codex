@@ -60,6 +60,7 @@ jobs:
           python3 .github/tmp-fix-batch-directory-identity.py
           python3 .github/tmp-finish-apply-patch-batch.py
           python3 .github/tmp-add-batch-integration-tests.py
+          python3 .github/tmp-add-windows-batch-reparse-test.py
           cd codex-rs
           cargo fmt --all
           cargo fmt --all -- --check
