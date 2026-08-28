@@ -60,7 +60,7 @@ fn native_windows_apply_patch_baseline() -> Result<()> {
         .with_target(false)
         .with_max_level(tracing::Level::DEBUG)
         .try_init()
-        .context("install baseline tracing subscriber")?;
+        .map_err(|error| anyhow::anyhow!("install baseline tracing subscriber: {error}"))?;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
