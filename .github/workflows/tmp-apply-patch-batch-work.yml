@@ -57,6 +57,7 @@ jobs:
           PY
           python3 .github/tmp-apply-patch-batch-rework.py
           python3 .github/tmp-fix-batch-engine.py
+          python3 .github/tmp-fix-batch-directory-identity.py
           python3 .github/tmp-finish-apply-patch-batch.py
           python3 .github/tmp-add-batch-integration-tests.py
           cd codex-rs
