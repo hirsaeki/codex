@@ -1,0 +1,139 @@
+name: windows-apply-patch-baseline
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/windows-apply-patch-baseline.yml
+      - codex-rs/apply-patch/**
+      - codex-rs/core/src/tools/runtimes/apply_patch.rs
+      - codex-rs/core/tests/windows_apply_patch_baseline.rs
+      - codex-rs/exec-server/**
+      - codex-rs/file-system/**
+      - codex-rs/sandboxing/**
+      - codex-rs/windows-sandbox-rs/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    name: Native Windows apply_patch baseline
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Build Windows sandbox helper binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build -p codex-windows-sandbox --bin codex-windows-sandbox-setup --bin codex-command-runner
+          $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
+          $debugDir = Join-Path $metadata.target_directory 'debug'
+          $debugDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "BASELINE_TARGET_DIR=$($metadata.target_directory)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Prepare isolated sandbox home
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $codexHome = Join-Path $env:RUNNER_TEMP 'codex-apply-patch-baseline-home'
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $codexHome
+          New-Item -ItemType Directory -Force -Path $codexHome | Out-Null
+          "CODEX_HOME=$codexHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run create update delete baseline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifactDir = Join-Path $env:RUNNER_TEMP 'windows-apply-patch-baseline'
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $rawLog = Join-Path $artifactDir 'baseline-raw.log'
+
+          & cargo test -p codex-core --test windows_apply_patch_baseline -- --nocapture --test-threads=1 2>&1 |
+            Tee-Object -FilePath $rawLog
+          $cargoExit = $LASTEXITCODE
+          if ($cargoExit -ne 0) {
+            exit $cargoExit
+          }
+
+          $current = $null
+          $requestCounts = @{}
+          $breakdowns = @{}
+          $results = [System.Collections.Generic.List[object]]::new()
+
+          foreach ($line in Get-Content $rawLog) {
+            if ($line -match 'APPLY_PATCH_BASELINE_BEGIN (?<name>create|update|delete)') {
+              $current = $Matches.name
+              $requestCounts[$current] = 0
+              $breakdowns[$current] = @{}
+              continue
+            }
+
+            if ($null -ne $current -and $line.Contains('filesystem sandbox helper invocation started')) {
+              $fsOperation = $null
+              if ($line -match 'operation="(?<operation>[^"]+)"') {
+                $fsOperation = $Matches.operation
+              } elseif ($line -match 'operation=(?<operation>\S+)') {
+                $fsOperation = $Matches.operation.Trim('"')
+              }
+              if ($null -ne $fsOperation) {
+                $requestCounts[$current]++
+                if (-not $breakdowns[$current].ContainsKey($fsOperation)) {
+                  $breakdowns[$current][$fsOperation] = 0
+                }
+                $breakdowns[$current][$fsOperation]++
+              }
+              continue
+            }
+
+            if ($line -match 'APPLY_PATCH_BASELINE_RESULT (?<json>\{.*\})') {
+              $row = $Matches.json | ConvertFrom-Json
+              $row | Add-Member -NotePropertyName fs_requests -NotePropertyValue $requestCounts[$row.operation]
+              $row | Add-Member -NotePropertyName fs_operations -NotePropertyValue $breakdowns[$row.operation]
+              $results.Add($row)
+              continue
+            }
+
+            if ($line -match 'APPLY_PATCH_BASELINE_END (?<name>create|update|delete)') {
+              $current = $null
+            }
+          }
+
+          if ($results.Count -ne 3) {
+            throw "expected three baseline rows, found $($results.Count)"
+          }
+          foreach ($row in $results) {
+            if ($row.fs_requests -ne $row.fs_helper_starts) {
+              throw "$($row.operation): fs request count $($row.fs_requests) did not match helper starts $($row.fs_helper_starts)"
+            }
+          }
+
+          $jsonPath = Join-Path $artifactDir 'baseline.json'
+          $results | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 $jsonPath
+
+          Add-Content $env:GITHUB_STEP_SUMMARY '| operation | total apply_patch ms | fs requests | fs-helper starts | setup refreshes | setup-refresh total ms |'
+          Add-Content $env:GITHUB_STEP_SUMMARY '| --- | ---: | ---: | ---: | ---: | ---: |'
+          foreach ($row in $results) {
+            Add-Content $env:GITHUB_STEP_SUMMARY ("| {0} | {1:N3} | {2} | {3} | {4} | {5:N3} |" -f $row.operation, $row.elapsed_ms, $row.fs_requests, $row.fs_helper_starts, $row.setup_refreshes, $row.setup_refresh_total_ms)
+          }
+          Add-Content $env:GITHUB_STEP_SUMMARY ''
+          Add-Content $env:GITHUB_STEP_SUMMARY 'Filesystem operation breakdown is stored in `baseline.json`.'
+
+      - name: Upload baseline evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-apply-patch-baseline-${{ github.sha }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/windows-apply-patch-baseline
+            ${{ env.CODEX_HOME }}/.sandbox/sandbox.*.log
