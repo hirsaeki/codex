@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Rebuild on latest main, validate, and push
+      - name: Diagnose sandbox batch runtime boundary
         shell: bash
         run: |
           set -euxo pipefail
@@ -34,6 +34,7 @@ jobs:
           cp .github/tmp-finish-apply-patch-batch.py /tmp/batch-scripts/
           cp .github/tmp-add-batch-integration-tests.py /tmp/batch-scripts/
           cp .github/tmp-add-windows-batch-reparse-test.py /tmp/batch-scripts/
+          cp .github/tmp-diag-direct-batch-no-spawn.py /tmp/batch-scripts/
           tar -czf /tmp/batch-source.tgz \
             codex-rs/apply-patch/src/prepared.rs \
             codex-rs/apply-patch/src/batch_tests.rs \
@@ -94,26 +95,8 @@ jobs:
           python3 /tmp/batch-scripts/tmp-finish-apply-patch-batch.py
           python3 /tmp/batch-scripts/tmp-add-batch-integration-tests.py
           python3 /tmp/batch-scripts/tmp-add-windows-batch-reparse-test.py
+          python3 /tmp/batch-scripts/tmp-diag-direct-batch-no-spawn.py
 
           cd codex-rs
           cargo fmt --all
-          cargo fmt --all -- --check
-          cargo check -p codex-file-system -p codex-exec-server-protocol -p codex-exec-server -p codex-apply-patch -p codex-core
-          cargo test -p codex-file-system
-          cargo test -p codex-exec-server file_mutation_batch
-          cargo test -p codex-exec-server-protocol fs_mutate_batch
-          cargo test -p codex-apply-patch
-          cargo test -p codex-exec-server --test file_system_unix file_system_mutate_batch_round_trips_unsandboxed_and_sandboxed
-          cargo test -p codex-core apply_patch
-          cargo clippy -p codex-file-system -p codex-exec-server-protocol -p codex-exec-server -p codex-apply-patch --all-targets -- -D warnings
-          cd ..
-
-          git diff --check
-          test -z "$(git diff --name-only origin/main -- .github)"
-          git add codex-rs
-          git diff --cached --check
-          test -n "$(git diff --cached --name-only)"
-          git config user.name hirsaeki
-          git config user.email 5356955+hirsaeki@users.noreply.github.com
-          git commit -m "Batch apply_patch filesystem mutations"
-          git push origin HEAD:perf/apply-patch-batch-mutation
+          cargo test -p codex-exec-server --test file_system_unix file_system_mutate_batch_round_trips_unsandboxed_and_sandboxed -- --nocapture
