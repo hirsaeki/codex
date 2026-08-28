@@ -74,7 +74,7 @@ async fn run_baseline() -> Result<()> {
     let workspace = tempfile::tempdir().context("create baseline workspace")?;
     let workspace = AbsolutePathBuf::from_absolute_path(workspace.path())?;
     let cwd = PathUri::from_abs_path(&workspace);
-    let target = cwd.join("baseline.txt")?;
+    let target_path = workspace.join("baseline.txt");
 
     let runtime_paths = ExecServerRuntimePaths::new(
         std::env::current_exe().context("resolve baseline test executable")?,
@@ -116,9 +116,7 @@ async fn run_baseline() -> Result<()> {
     )
     .await?;
     anyhow::ensure!(
-        fs.read_file_text(&target, Default::default(), Some(&sandbox))
-            .await?
-            == "one\n",
+        std::fs::read_to_string(&target_path)? == "one\n",
         "create fixture contents did not match"
     );
 
@@ -133,9 +131,7 @@ async fn run_baseline() -> Result<()> {
     )
     .await?;
     anyhow::ensure!(
-        fs.read_file_text(&target, Default::default(), Some(&sandbox))
-            .await?
-            == "two\n",
+        std::fs::read_to_string(&target_path)? == "two\n",
         "update fixture contents did not match"
     );
 
@@ -150,7 +146,7 @@ async fn run_baseline() -> Result<()> {
     )
     .await?;
     anyhow::ensure!(
-        !target.to_abs_path()?.exists(),
+        !target_path.exists(),
         "delete fixture still exists after apply_patch"
     );
 
