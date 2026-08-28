@@ -56,14 +56,18 @@ pub(super) async fn create_directory(path: PathBuf, recursive: bool) -> io::Resu
 ''',
 )
 
-# Windows: the hardened NtCreateFile path gives us a non-reparse handle; MetadataExt exposes its
-# stable volume/file index identity without reopening through a path-following API.
+# Windows: use the existing hardened NtCreateFile path, then query identity from that exact handle.
 path = "codex-rs/exec-server/src/no_follow/windows.rs"
 one(path, "use crate::regular_file;\n", "use crate::regular_file;\nuse super::DirectoryIdentity;\n")
 one(
     path,
-    "use std::os::windows::ffi::OsStrExt;\n",
-    "use std::os::windows::ffi::OsStrExt;\nuse std::os::windows::fs::MetadataExt as _;\n",
+    "use windows_sys::Win32::Storage::FileSystem::DELETE;\n",
+    "use windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION;\nuse windows_sys::Win32::Storage::FileSystem::DELETE;\n",
+)
+one(
+    path,
+    "use windows_sys::Win32::Storage::FileSystem::FileDispositionInfo;\n",
+    "use windows_sys::Win32::Storage::FileSystem::FileDispositionInfo;\nuse windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle;\n",
 )
 one(
     path,
@@ -71,22 +75,22 @@ one(
     '''pub(super) async fn directory_identity(path: PathBuf) -> io::Result<DirectoryIdentity> {
     tokio::task::spawn_blocking(move || {
         let file = open_entry(&path)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_dir() {
+        if !file.metadata()?.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "path is not a directory",
             ));
         }
-        let first = metadata.volume_serial_number().ok_or_else(|| {
-            io::Error::other("directory volume serial number is unavailable")
-        })?;
-        let second = metadata
-            .file_index()
-            .ok_or_else(|| io::Error::other("directory file index is unavailable"))?;
+        let mut info = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+        let result = unsafe {
+            GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info)
+        };
+        if result == 0 {
+            return Err(io::Error::last_os_error());
+        }
         Ok(DirectoryIdentity {
-            first: u64::from(first),
-            second,
+            first: u64::from(info.dwVolumeSerialNumber),
+            second: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
         })
     })
     .await
@@ -212,45 +216,10 @@ async fn directory_identity(
     if !follow_symlinks {
         return no_follow::directory_identity(native.as_path()).await;
     }
-    let path = native.into_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let metadata = std::fs::metadata(&path)?;
-        if !metadata.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "path is not a directory",
-            ));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            return Ok(no_follow::DirectoryIdentity {
-                first: metadata.dev(),
-                second: metadata.ino(),
-            });
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt as _;
-            let first = metadata.volume_serial_number().ok_or_else(|| {
-                io::Error::other("directory volume serial number is unavailable")
-            })?;
-            let second = metadata
-                .file_index()
-                .ok_or_else(|| io::Error::other("directory file index is unavailable"))?;
-            return Ok(no_follow::DirectoryIdentity {
-                first: u64::from(first),
-                second,
-            });
-        }
-        #[cfg(not(any(unix, windows)))]
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "stable directory identity is unavailable on this platform",
-        ))
-    })
-    .await
-    .map_err(|error| io::Error::other(format!("filesystem task failed: {error}")))?
+    // Following is explicitly enabled for this batch. Canonicalize first, then obtain identity
+    // through the no-follow primitive for the resolved target.
+    let canonicalized = tokio::fs::canonicalize(native.as_path()).await?;
+    no_follow::directory_identity(canonicalized.as_path()).await
 }
 '''
 if text.count(old) != 1:
