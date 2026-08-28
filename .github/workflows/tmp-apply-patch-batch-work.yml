@@ -5,6 +5,10 @@ on:
     branches:
       - automation/apply-patch-batch-work
 
+concurrency:
+  group: tmp-apply-patch-batch-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -65,8 +69,11 @@ jobs:
           cargo fmt --all
           cargo fmt --all -- --check
           cargo check -p codex-file-system -p codex-exec-server-protocol -p codex-exec-server -p codex-apply-patch -p codex-core
+          cargo test -p codex-file-system
           cargo test -p codex-exec-server file_mutation_batch
           cargo test -p codex-exec-server-protocol fs_mutate_batch
           cargo test -p codex-apply-patch
           cargo test -p codex-exec-server --test file_system_unix file_system_mutate_batch_round_trips_unsandboxed_and_sandboxed
+          cargo test -p codex-core apply_patch
+          cargo clippy -p codex-file-system -p codex-exec-server-protocol -p codex-exec-server -p codex-apply-patch --all-targets -- -D warnings
           git diff --check
