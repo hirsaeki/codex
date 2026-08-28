@@ -5,9 +5,14 @@ on:
     branches:
       - perf/instrument-apply-patch-sandbox
     paths:
-      - '.github/scripts/instrument_apply_patch_baseline.py'
       - '.github/workflows/apply-patch-baseline-build.yml'
       - '.github/workflows/apply-patch-baseline-measure.yml'
+      - 'codex-rs/core/tests/windows_apply_patch_baseline.rs'
+      - 'codex-rs/exec-server/**'
+      - 'codex-rs/file-system/**'
+      - 'codex-rs/sandboxing/**'
+      - 'codex-rs/windows-sandbox-rs/**'
+      - 'codex-rs/apply-patch/**'
   workflow_dispatch:
 
 permissions:
@@ -26,34 +31,40 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-ci
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-      - name: Apply baseline-only instrumentation
-        working-directory: .
-        run: python .github/scripts/instrument_apply_patch_baseline.py
-      - name: Build instrumented Windows baseline binaries
+
+      - name: Build Windows sandbox helpers
         shell: pwsh
-        run: >-
-          cargo build --release
-          -p codex-cli
-          -p codex-windows-sandbox
-          -p codex-apply-patch
-          --bin codex
-          --bin codex-windows-sandbox-setup
-          --bin codex-command-runner
-          --bin apply_patch_sandbox_baseline
-      - name: Stage baseline binaries
+        run: cargo build -p codex-windows-sandbox --bin codex-windows-sandbox-setup --bin codex-command-runner
+
+      - name: Build baseline test without running it
+        shell: pwsh
+        run: cargo test -p codex-core --test windows_apply_patch_baseline --no-run
+
+      - name: Stage reusable baseline artifact
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
+          $debugDir = Join-Path $metadata.target_directory 'debug'
+          $depsDir = Join-Path $debugDir 'deps'
+          $testExe = Get-ChildItem -Path $depsDir -Filter 'windows_apply_patch_baseline-*.exe' |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if (-not $testExe) {
+            throw 'windows_apply_patch_baseline test executable was not found'
+          }
+
           $out = Join-Path $env:RUNNER_TEMP 'apply-patch-baseline-bin'
           New-Item -ItemType Directory -Force -Path $out | Out-Null
-          Copy-Item target/release/codex.exe $out/
-          Copy-Item target/release/codex-windows-sandbox-setup.exe $out/
-          Copy-Item target/release/codex-command-runner.exe $out/
-          Copy-Item target/release/apply_patch_sandbox_baseline.exe $out/
+          Copy-Item $testExe.FullName (Join-Path $out 'windows_apply_patch_baseline.exe')
+          Copy-Item (Join-Path $debugDir 'codex-windows-sandbox-setup.exe') $out
+          Copy-Item (Join-Path $debugDir 'codex-command-runner.exe') $out
           Set-Content -Path (Join-Path $out 'commit-sha.txt') -Value $env:GITHUB_SHA -NoNewline
-      - name: Upload instrumented baseline binaries
-        uses: actions/upload-artifact@v4
+
+      - name: Upload reusable baseline binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: apply-patch-baseline-${{ github.sha }}
+          name: windows-apply-patch-baseline-bin-${{ github.sha }}
           path: ${{ runner.temp }}/apply-patch-baseline-bin
           if-no-files-found: error
           retention-days: 14
