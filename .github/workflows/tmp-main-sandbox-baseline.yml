@@ -1,0 +1,27 @@
+name: tmp main sandbox baseline
+
+on:
+  push:
+    branches:
+      - automation/apply-patch-batch-work
+    paths:
+      - .github/workflows/tmp-main-sandbox-baseline.yml
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test untouched latest main sandbox helper
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git fetch origin main
+          git checkout --detach origin/main
+          cd codex-rs
+          cargo test -p codex-exec-server --test file_system_unix file_system_write_file_writes_bytes -- --nocapture
