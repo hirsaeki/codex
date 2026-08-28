@@ -18,6 +18,7 @@ on:
 permissions:
   contents: read
 
+# Build once on the feature branch; the manual measurement workflow reuses this artifact.
 jobs:
   build-windows-baseline:
     runs-on: windows-latest
