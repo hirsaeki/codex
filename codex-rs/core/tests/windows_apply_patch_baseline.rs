@@ -100,10 +100,10 @@ async fn run_baseline() -> Result<()> {
         .context("warm up Windows sandbox")?;
 
     let log_path = codex_windows_sandbox::current_log_file_path_for_codex_home(&codex_home);
-    std::fs::write(&log_path, "").with_context(|| {
-        format!("clear warm-up sandbox log at {}", log_path.display())
-    })?;
-    let mut log_line_count = 0;
+    let mut log_line_count = std::fs::read_to_string(&log_path)
+        .with_context(|| format!("read warm-up sandbox log at {}", log_path.display()))?
+        .lines()
+        .count();
 
     log_line_count = run_patch(
         "create",
