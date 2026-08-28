@@ -6,6 +6,7 @@ use codex_exec_server::FileMutation;
 use codex_exec_server::FileMutationBatch;
 use codex_exec_server::FilePreimage;
 use codex_exec_server::FileSystemSandboxContext;
+use codex_exec_server::GetMetadataOptions;
 use codex_exec_server::ReadFileOptions;
 use codex_utils_path_uri::PathUri;
 
@@ -55,6 +56,14 @@ pub(crate) async fn prepare_hunks(
             sandbox,
         )
         .await?;
+        note_existing_path_delta_support(
+            &source_path,
+            fs,
+            options.follow_symlinks,
+            sandbox,
+            &mut delta.exact,
+        )
+        .await;
         let affected_path = hunk.path().to_path_buf();
 
         match hunk {
@@ -109,6 +118,13 @@ pub(crate) async fn prepare_hunks(
                     .as_ref()
                     .map(|path| cwd.join(&path.to_string_lossy()))
                     .transpose()?;
+                if destination.as_ref() == Some(&source_path) {
+                    return Err(crate::ParseError::InvalidPatchError(format!(
+                        "move destination is the same as source {}",
+                        source_path.inferred_native_path_string()
+                    ))
+                    .into());
+                }
                 let overwritten_move_content = if let Some(destination) = &destination {
                     load_path(
                         destination,
@@ -119,6 +135,14 @@ pub(crate) async fn prepare_hunks(
                         sandbox,
                     )
                     .await?;
+                    note_existing_path_delta_support(
+                        destination,
+                        fs,
+                        options.follow_symlinks,
+                        sandbox,
+                        &mut delta.exact,
+                    )
+                    .await;
                     let content = overlay[destination]
                         .current
                         .as_deref()
@@ -222,6 +246,24 @@ async fn load_path(
     );
     path_order.push(path.clone());
     Ok(())
+}
+
+async fn note_existing_path_delta_support(
+    path: &PathUri,
+    fs: &dyn ExecutorFileSystem,
+    follow_symlinks: bool,
+    sandbox: Option<&FileSystemSandboxContext>,
+    exact: &mut bool,
+) {
+    match fs
+        .get_metadata(path, GetMetadataOptions { follow_symlinks }, sandbox)
+        .await
+    {
+        Ok(metadata) if metadata.is_file && !metadata.is_symlink => {}
+        Ok(_) => *exact = false,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => *exact = false,
+    }
 }
 
 fn current_bytes(
