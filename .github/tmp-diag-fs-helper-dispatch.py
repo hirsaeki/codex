@@ -35,6 +35,7 @@ text = replace_once(
     eprintln!("FSHDBG serde:start");
     let request: FsHelperRequest = serde_json::from_str(&input)?;
     let request_name = match &request {
+        FsHelperRequest::DiscoverCapabilityRoots(_) => "discoverCapabilityRoots",
         FsHelperRequest::Open(_) => "open",
         FsHelperRequest::ReadFile(_) => "readFile",
         FsHelperRequest::WriteFile(_) => "writeFile",
