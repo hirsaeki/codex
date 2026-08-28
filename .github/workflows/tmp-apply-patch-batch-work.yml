@@ -101,4 +101,6 @@ jobs:
 
           cd codex-rs
           cargo fmt --all
+          cargo test -p codex-exec-server --test file_system_unix file_system_write_file_writes_bytes -- --nocapture
+          cargo test -p codex-exec-server --test file_system_unix file_system_create_directory_creates_nested_directories -- --nocapture
           cargo test -p codex-exec-server --test file_system_unix file_system_mutate_batch_sandbox_diagnostic_matrix -- --nocapture
