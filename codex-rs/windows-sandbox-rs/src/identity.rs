@@ -7,6 +7,7 @@ use crate::setup::SandboxUsersFile;
 use crate::setup::SetupMarker;
 use crate::setup::gather_read_roots;
 use crate::setup::gather_write_roots_for_permissions;
+use crate::setup::invalidate_setup_refresh_success_cache;
 use crate::setup::offline_proxy_settings_from_env;
 use crate::setup::run_elevated_setup_with_proxy_settings;
 use crate::setup::run_setup_refresh_with_overrides_and_proxy_settings;
@@ -99,6 +100,8 @@ fn load_users(codex_home: &Path) -> Result<Option<SandboxUsersFile>> {
 }
 
 fn remove_sandbox_users_file(codex_home: &Path, reason: &str) -> Result<()> {
+    // A known-stale credential file must never be masked by an earlier successful refresh.
+    invalidate_setup_refresh_success_cache(codex_home, "sandbox users stale");
     let path = sandbox_users_path(codex_home);
     debug_log(
         &format!("{reason}; deleting {}", path.display()),
@@ -321,10 +324,20 @@ mod tests {
     use crate::setup::SandboxNetworkIdentity;
     use crate::setup::SetupMarker;
     use crate::setup::sandbox_users_path;
+    use crate::setup::setup_refresh_cache_generation_for_tests;
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn stale_sandbox_users_invalidate_setup_refresh_success_cache() {
+        let codex_home = TempDir::new().expect("tempdir");
+        let before = setup_refresh_cache_generation_for_tests();
+        remove_sandbox_users_file(codex_home.path(), "stale creds").expect("remove users");
+        let after = setup_refresh_cache_generation_for_tests();
+        assert_ne!(after, before);
+    }
 
     #[test]
     fn remove_sandbox_users_file_deletes_existing_file() {

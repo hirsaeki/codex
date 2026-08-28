@@ -143,6 +143,74 @@ impl SetupFlight {
 
 static SETUP_FLIGHTS: OnceLock<Mutex<HashMap<String, Arc<SetupFlight>>>> = OnceLock::new();
 
+#[derive(Default)]
+struct SetupRefreshSuccessState {
+    generation: u64,
+    successful: HashSet<String>,
+}
+
+#[derive(Default)]
+struct SetupRefreshSuccessCache {
+    state: Mutex<SetupRefreshSuccessState>,
+}
+
+impl SetupRefreshSuccessCache {
+    fn generation_if_missing(&self, key: &str) -> Option<u64> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (!state.successful.contains(key)).then_some(state.generation)
+    }
+
+    fn record_success(&self, key: String, generation: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.generation == generation {
+            state.successful.insert(key);
+        }
+    }
+
+    fn invalidate(&self) -> u64 {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.generation = state.generation.wrapping_add(1);
+        state.successful.clear();
+        state.generation
+    }
+
+    #[cfg(test)]
+    fn generation(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation
+    }
+}
+
+static SETUP_REFRESH_SUCCESS_CACHE: OnceLock<SetupRefreshSuccessCache> = OnceLock::new();
+
+fn setup_refresh_success_cache() -> &'static SetupRefreshSuccessCache {
+    SETUP_REFRESH_SUCCESS_CACHE.get_or_init(SetupRefreshSuccessCache::default)
+}
+
+pub(crate) fn invalidate_setup_refresh_success_cache(codex_home: &Path, reason: &str) {
+    let generation = setup_refresh_success_cache().invalidate();
+    log_note(
+        &format!("setup refresh cache: invalidated generation={generation} reason={reason}"),
+        Some(&sandbox_dir(codex_home)),
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn setup_refresh_cache_generation_for_tests() -> u64 {
+    setup_refresh_success_cache().generation()
+}
+
 fn run_setup_singleflight(key: String, run: impl FnOnce() -> Result<()>) -> Result<()> {
     let flights = SETUP_FLIGHTS.get_or_init(|| Mutex::new(HashMap::new()));
     let (flight, is_leader) = {
@@ -179,6 +247,41 @@ fn run_setup_singleflight(key: String, run: impl FnOnce() -> Result<()>) -> Resu
         flights.remove(&key);
     }
     result
+}
+
+fn run_setup_refresh_cached_with(
+    cache: &SetupRefreshSuccessCache,
+    key: String,
+    codex_home: &Path,
+    run: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if cache.generation_if_missing(&key).is_none() {
+        log_note("setup refresh cache: hit", Some(&sandbox_dir(codex_home)));
+        return Ok(());
+    }
+    log_note("setup refresh cache: miss", Some(&sandbox_dir(codex_home)));
+
+    run_setup_singleflight(key.clone(), || {
+        // A matching refresh may have completed after the optimistic cache check but
+        // before this caller became the singleflight leader.
+        let Some(generation) = cache.generation_if_missing(&key) else {
+            log_note("setup refresh cache: hit", Some(&sandbox_dir(codex_home)));
+            return Ok(());
+        };
+        let result = run();
+        if result.is_ok() {
+            cache.record_success(key, generation);
+        }
+        result
+    })
+}
+
+fn run_setup_refresh_cached(
+    key: String,
+    codex_home: &Path,
+    run: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    run_setup_refresh_cached_with(setup_refresh_success_cache(), key, codex_home, run)
 }
 
 pub fn sandbox_dir(codex_home: &Path) -> PathBuf {
@@ -351,7 +454,7 @@ fn run_setup_refresh_inner(
     };
     let json = serde_json::to_vec(&payload)?;
     let b64 = BASE64_STANDARD.encode(json);
-    run_setup_singleflight(b64.clone(), || {
+    run_setup_refresh_cached(b64.clone(), request.codex_home, || {
         run_setup_refresh_payload(&b64, request.codex_home)
     })
 }
@@ -914,6 +1017,9 @@ fn run_setup_exe_payload(
     needs_elevation: bool,
     codex_home: &Path,
 ) -> Result<()> {
+    // Full/provision setup can replace credentials, marker data, ACL state, or firewall state.
+    // Invalidate only in the singleflight leader that is about to launch the helper.
+    invalidate_setup_refresh_success_cache(codex_home, "persistent setup helper launch");
     use windows_sys::Win32::System::Threading::GetExitCodeProcess;
     use windows_sys::Win32::System::Threading::INFINITE;
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
@@ -1411,6 +1517,224 @@ mod tests {
             extract_failure(&err).map(|failure| failure.code),
             Some(SetupErrorCode::OrchestratorHelperIncomplete)
         );
+    }
+
+    #[test]
+    fn identical_successful_setup_refreshes_reuse_success() {
+        let cache = super::SetupRefreshSuccessCache::default();
+        let codex_home = TempDir::new().expect("tempdir");
+        let runs = AtomicUsize::new(0);
+        for _ in 0..2 {
+            super::run_setup_refresh_cached_with(
+                &cache,
+                "sequential-success".to_string(),
+                codex_home.path(),
+                || {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .expect("refresh succeeds");
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn concurrent_successful_setup_refreshes_keep_singleflight() {
+        let cache = Arc::new(super::SetupRefreshSuccessCache::default());
+        let codex_home = Arc::new(TempDir::new().expect("tempdir"));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let leader = {
+            let cache = Arc::clone(&cache);
+            let codex_home = Arc::clone(&codex_home);
+            let runs = Arc::clone(&runs);
+            thread::spawn(move || {
+                super::run_setup_refresh_cached_with(
+                    &cache,
+                    "cached-concurrent-success".to_string(),
+                    codex_home.path(),
+                    || {
+                        runs.fetch_add(1, Ordering::SeqCst);
+                        started_tx.send(()).expect("signal leader started");
+                        release_rx.recv().expect("release leader");
+                        Ok(())
+                    },
+                )
+            })
+        };
+        started_rx.recv().expect("leader started");
+
+        let waiter = {
+            let cache = Arc::clone(&cache);
+            let codex_home = Arc::clone(&codex_home);
+            let runs = Arc::clone(&runs);
+            thread::spawn(move || {
+                super::run_setup_refresh_cached_with(
+                    &cache,
+                    "cached-concurrent-success".to_string(),
+                    codex_home.path(),
+                    || {
+                        runs.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let attached = super::SETUP_FLIGHTS
+                .get()
+                .expect("setup flights initialized")
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get("cached-concurrent-success")
+                .is_some_and(|flight| Arc::strong_count(flight) >= 3);
+            if attached {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "waiter did not join setup flight"
+            );
+            thread::yield_now();
+        }
+
+        release_tx.send(()).expect("release leader");
+        leader
+            .join()
+            .expect("leader thread")
+            .expect("leader result");
+        waiter
+            .join()
+            .expect("waiter thread")
+            .expect("waiter result");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn different_setup_refresh_payloads_run_separately() {
+        let cache = super::SetupRefreshSuccessCache::default();
+        let codex_home = TempDir::new().expect("tempdir");
+        let runs = AtomicUsize::new(0);
+        for key in ["payload-a", "payload-b"] {
+            super::run_setup_refresh_cached_with(
+                &cache,
+                key.to_string(),
+                codex_home.path(),
+                || {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .expect("refresh succeeds");
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn failed_setup_refresh_is_not_cached() {
+        let cache = super::SetupRefreshSuccessCache::default();
+        let codex_home = TempDir::new().expect("tempdir");
+        let runs = AtomicUsize::new(0);
+        let first = super::run_setup_refresh_cached_with(
+            &cache,
+            "failure-not-cached".to_string(),
+            codex_home.path(),
+            || {
+                runs.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("refresh failed")
+            },
+        );
+        assert!(first.is_err());
+        super::run_setup_refresh_cached_with(
+            &cache,
+            "failure-not-cached".to_string(),
+            codex_home.path(),
+            || {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect("retry succeeds");
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn invalidation_forces_setup_refresh_again() {
+        let cache = super::SetupRefreshSuccessCache::default();
+        let codex_home = TempDir::new().expect("tempdir");
+        let runs = AtomicUsize::new(0);
+        super::run_setup_refresh_cached_with(
+            &cache,
+            "invalidate-success".to_string(),
+            codex_home.path(),
+            || {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect("first refresh succeeds");
+        cache.invalidate();
+        super::run_setup_refresh_cached_with(
+            &cache,
+            "invalidate-success".to_string(),
+            codex_home.path(),
+            || {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect("post-invalidation refresh succeeds");
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn invalidation_during_refresh_prevents_stale_success_from_returning() {
+        let cache = Arc::new(super::SetupRefreshSuccessCache::default());
+        let codex_home = Arc::new(TempDir::new().expect("tempdir"));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let leader = {
+            let cache = Arc::clone(&cache);
+            let codex_home = Arc::clone(&codex_home);
+            let runs = Arc::clone(&runs);
+            thread::spawn(move || {
+                super::run_setup_refresh_cached_with(
+                    &cache,
+                    "generation-race".to_string(),
+                    codex_home.path(),
+                    || {
+                        runs.fetch_add(1, Ordering::SeqCst);
+                        started_tx.send(()).expect("signal leader started");
+                        release_rx.recv().expect("release leader");
+                        Ok(())
+                    },
+                )
+            })
+        };
+        started_rx.recv().expect("leader started");
+        cache.invalidate();
+        release_tx.send(()).expect("release leader");
+        leader
+            .join()
+            .expect("leader thread")
+            .expect("leader result");
+        super::run_setup_refresh_cached_with(
+            &cache,
+            "generation-race".to_string(),
+            codex_home.path(),
+            || {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect("post-invalidation refresh succeeds");
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
 
     #[test]
