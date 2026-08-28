@@ -1,0 +1,110 @@
+name: apply-patch baseline measurement
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  measure-windows-baseline:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Resolve latest successful baseline build
+        id: build
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $branch = [uri]::EscapeDataString('perf/instrument-apply-patch-sandbox')
+          $uri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/workflows/apply-patch-baseline-build.yml/runs?branch=$branch&event=push&status=success&per_page=1"
+          $response = Invoke-RestMethod -Headers $headers -Uri $uri
+          if (-not $response.workflow_runs -or $response.workflow_runs.Count -ne 1) {
+            throw 'No successful baseline build found for perf/instrument-apply-patch-sandbox'
+          }
+          $run = $response.workflow_runs[0]
+          "run_id=$($run.id)" >> $env:GITHUB_OUTPUT
+          "head_sha=$($run.head_sha)" >> $env:GITHUB_OUTPUT
+          Write-Host "Using baseline build run $($run.id) for $($run.head_sha)"
+
+      - name: Download instrumented binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: apply-patch-baseline-${{ steps.build.outputs.head_sha }}
+          path: ${{ runner.temp }}/apply-patch-baseline-bin
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.build.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Warm Windows sandbox setup
+        shell: pwsh
+        env:
+          CODEX_HOME: ${{ runner.temp }}/apply-patch-baseline-codex-home
+          CODEX_BASELINE_CODEX_EXE: ${{ runner.temp }}/apply-patch-baseline-bin/codex.exe
+        run: |
+          $warm = Join-Path $env:RUNNER_TEMP 'apply-patch-baseline-warm'
+          New-Item -ItemType Directory -Force -Path $warm | Out-Null
+          & "$env:RUNNER_TEMP/apply-patch-baseline-bin/apply_patch_sandbox_baseline.exe" $warm *> "$env:RUNNER_TEMP/warmup.log"
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content "$env:RUNNER_TEMP/warmup.log"
+            throw "warmup failed with exit code $LASTEXITCODE"
+          }
+          Remove-Item "$env:RUNNER_TEMP/warmup.log" -Force
+          Get-ChildItem -Path (Join-Path $env:CODEX_HOME '.sandbox') -Filter 'sandbox.*.log' -ErrorAction SilentlyContinue | Remove-Item -Force
+
+      - name: Measure create update delete
+        shell: pwsh
+        env:
+          CODEX_HOME: ${{ runner.temp }}/apply-patch-baseline-codex-home
+          CODEX_BASELINE_CODEX_EXE: ${{ runner.temp }}/apply-patch-baseline-bin/codex.exe
+        run: |
+          $workspace = Join-Path $env:RUNNER_TEMP 'apply-patch-baseline-workspace'
+          New-Item -ItemType Directory -Force -Path $workspace | Out-Null
+          $output = Join-Path $env:RUNNER_TEMP 'apply-patch-baseline-output.log'
+          & "$env:RUNNER_TEMP/apply-patch-baseline-bin/apply_patch_sandbox_baseline.exe" $workspace 2>&1 | Tee-Object -FilePath $output
+          if ($LASTEXITCODE -ne 0) {
+            throw "baseline measurement failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Collect sandbox logs and metadata
+        if: always()
+        shell: pwsh
+        env:
+          CODEX_HOME: ${{ runner.temp }}/apply-patch-baseline-codex-home
+          BUILD_SHA: ${{ steps.build.outputs.head_sha }}
+          BUILD_RUN_ID: ${{ steps.build.outputs.run_id }}
+        run: |
+          $result = Join-Path $env:RUNNER_TEMP 'apply-patch-baseline-result'
+          New-Item -ItemType Directory -Force -Path $result | Out-Null
+          if (Test-Path "$env:RUNNER_TEMP/apply-patch-baseline-output.log") {
+            Copy-Item "$env:RUNNER_TEMP/apply-patch-baseline-output.log" $result/
+          }
+          $sandboxDir = Join-Path $env:CODEX_HOME '.sandbox'
+          if (Test-Path $sandboxDir) {
+            Get-ChildItem $sandboxDir -Filter 'sandbox.*.log' | Copy-Item -Destination $result
+          }
+          @(
+            "build_sha=$env:BUILD_SHA"
+            "build_run_id=$env:BUILD_RUN_ID"
+            "runner_os=$env:RUNNER_OS"
+            "runner_arch=$env:RUNNER_ARCH"
+            "image_os=$env:ImageOS"
+            "image_version=$env:ImageVersion"
+            "windows_sandbox_level=elevated"
+          ) | Set-Content (Join-Path $result 'metadata.txt')
+
+      - name: Upload baseline measurement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apply-patch-baseline-measurement-${{ steps.build.outputs.head_sha }}
+          path: ${{ runner.temp }}/apply-patch-baseline-result
+          if-no-files-found: error
+          retention-days: 14
