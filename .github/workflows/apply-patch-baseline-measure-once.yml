@@ -1,4 +1,5 @@
 name: apply-patch baseline measurement once
+# One-shot trigger: this workflow intentionally reuses the last successful baseline build artifact.
 
 on:
   push:
