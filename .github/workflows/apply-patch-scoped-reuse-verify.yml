@@ -1,6 +1,11 @@
 name: apply-patch scoped helper reuse verify
 
 on:
+  push:
+    branches:
+      - perf/apply-patch-scoped-fs-helper-reuse
+    paths:
+      - '.github/workflows/apply-patch-scoped-reuse-verify.yml'
   workflow_dispatch:
 
 permissions:
