@@ -204,6 +204,7 @@ pub use remote::run_remote_environment_until_shutdown;
 pub use resolved_capability::ResolvedSelectedCapabilityRoot;
 pub use resolved_capability::SelectedCapabilityRootsStatus;
 pub use runtime_paths::ExecServerRuntimePaths;
+pub use sandboxed_file_system::with_apply_patch_fs_helper_reuse;
 pub use server::ConcurrentRequestLimit;
 pub use server::DEFAULT_LISTEN_URL;
 pub use server::ExecServerListenUrlParseError;
