@@ -6,6 +6,17 @@ on:
       - perf/apply-patch-scoped-fs-helper-reuse
     paths:
       - '.github/workflows/apply-patch-scoped-reuse-verify.yml'
+      - 'codex-rs/core/src/tools/runtimes/apply_patch.rs'
+      - 'codex-rs/core/tests/windows_apply_patch_baseline.rs'
+      - 'codex-rs/exec-server/src/fs_helper_main.rs'
+      - 'codex-rs/exec-server/src/fs_sandbox.rs'
+      - 'codex-rs/exec-server/src/lib.rs'
+      - 'codex-rs/exec-server/src/local_file_system.rs'
+      - 'codex-rs/exec-server/src/sandboxed_file_system.rs'
+      - 'codex-rs/file-system/**'
+      - 'codex-rs/sandboxing/**'
+      - 'codex-rs/windows-sandbox-rs/**'
+      - 'codex-rs/apply-patch/**'
   workflow_dispatch:
 
 permissions:
