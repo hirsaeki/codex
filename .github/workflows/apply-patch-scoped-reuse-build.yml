@@ -1,0 +1,83 @@
+name: apply-patch scoped helper reuse build
+
+on:
+  push:
+    branches:
+      - perf/apply-patch-scoped-fs-helper-reuse
+    paths:
+      - '.github/workflows/apply-patch-scoped-reuse-build.yml'
+      - 'codex-rs/Cargo.toml'
+      - 'codex-rs/Cargo.lock'
+      - 'codex-rs/core/src/tools/runtimes/apply_patch.rs'
+      - 'codex-rs/core/tests/windows_apply_patch_baseline.rs'
+      - 'codex-rs/exec-server/**'
+      - 'codex-rs/file-system/**'
+      - 'codex-rs/sandboxing/**'
+      - 'codex-rs/windows-sandbox-rs/**'
+      - 'codex-rs/apply-patch/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Compile the P1R verification inputs once. The verify workflow consumes this
+# artifact directly and must not rebuild source while test infrastructure is
+# being debugged.
+jobs:
+  build-windows-scoped-reuse:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Check formatting
+        shell: pwsh
+        run: cargo fmt --all -- --check
+
+      - name: Build Windows sandbox helpers
+        shell: pwsh
+        run: cargo build -p codex-windows-sandbox --bin codex-windows-sandbox-setup --bin codex-command-runner
+
+      - name: Build P0 harness without running it
+        shell: pwsh
+        run: cargo test -p codex-core --test windows_apply_patch_baseline --no-run
+
+      - name: Stage reusable verification artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
+          $debugDir = Join-Path $metadata.target_directory 'debug'
+          $depsDir = Join-Path $debugDir 'deps'
+          $testExe = Get-ChildItem -Path $depsDir -Filter 'windows_apply_patch_baseline-*.exe' |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if (-not $testExe) {
+            throw 'windows_apply_patch_baseline test executable was not found'
+          }
+
+          $out = Join-Path $env:RUNNER_TEMP 'apply-patch-scoped-reuse-bin'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          # Keep the test executable and Windows helper binaries as siblings.
+          # The sandbox helper materialization path resolves codex-command-runner
+          # relative to current_exe() before falling back to a legacy lookup.
+          Copy-Item $testExe.FullName (Join-Path $out 'windows_apply_patch_baseline.exe')
+          Copy-Item (Join-Path $debugDir 'codex-windows-sandbox-setup.exe') $out
+          Copy-Item (Join-Path $debugDir 'codex-command-runner.exe') $out
+          Set-Content -Path (Join-Path $out 'commit-sha.txt') -Value $env:GITHUB_SHA -NoNewline
+
+      - name: Upload reusable verification binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-apply-patch-scoped-reuse-bin-${{ github.sha }}
+          path: ${{ runner.temp }}/apply-patch-scoped-reuse-bin
+          if-no-files-found: error
+          retention-days: 14
