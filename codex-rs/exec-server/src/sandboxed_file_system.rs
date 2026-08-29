@@ -128,12 +128,14 @@ impl ScopedFsHelper {
         command: codex_sandboxing::SandboxExecRequest,
     ) -> FileSystemResult<Self> {
         let mut child = spawn_command(command, Stdio::piped()).map_err(map_sandbox_error)?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            io::Error::other("failed to open apply_patch fs helper stdin")
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            io::Error::other("failed to open apply_patch fs helper stdout")
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("failed to open apply_patch fs helper stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("failed to open apply_patch fs helper stdout"))?;
         let stderr = drain_helper_stderr(&mut child);
         Ok(Self {
             key,
@@ -147,7 +149,9 @@ impl ScopedFsHelper {
     async fn run(&mut self, request: FsHelperRequest) -> FileSystemResult<FsHelperPayload> {
         let operation = fs_helper_operation(&request);
         let mut request_json = serde_json::to_vec(&request).map_err(|error| {
-            io::Error::other(format!("failed to encode fs sandbox helper message: {error}"))
+            io::Error::other(format!(
+                "failed to encode fs sandbox helper message: {error}"
+            ))
         })?;
         request_json.push(b'\n');
 
@@ -164,9 +168,12 @@ impl ScopedFsHelper {
                     "fs sandbox helper closed stdout without responding",
                 ));
             }
-            let response: FsHelperResponse = serde_json::from_slice(&response).map_err(|error| {
-                io::Error::other(format!("failed to decode fs sandbox helper message: {error}"))
-            })?;
+            let response: FsHelperResponse =
+                serde_json::from_slice(&response).map_err(|error| {
+                    io::Error::other(format!(
+                        "failed to decode fs sandbox helper message: {error}"
+                    ))
+                })?;
             match response {
                 FsHelperResponse::Ok(payload) => Ok(payload),
                 FsHelperResponse::Error(error) => Err(map_sandbox_error(error)),
