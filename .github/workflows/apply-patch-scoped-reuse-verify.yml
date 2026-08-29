@@ -44,6 +44,18 @@ jobs:
         shell: pwsh
         run: cargo build -p codex-windows-sandbox --bin codex-windows-sandbox-setup --bin codex-command-runner
 
+      - name: Prepare P0 measurement environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
+          $debugDir = Join-Path $metadata.target_directory 'debug'
+          $codexHome = Join-Path $env:RUNNER_TEMP 'codex-apply-patch-scoped-reuse-home'
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $codexHome
+          New-Item -ItemType Directory -Force -Path $codexHome | Out-Null
+          "CODEX_HOME=$codexHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$debugDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Verify scoped helper reuse with the P0 harness
         shell: pwsh
-        run: cargo test -p codex-core --test windows_apply_patch_baseline -- --nocapture
+        run: cargo test -p codex-core --test windows_apply_patch_baseline -- --nocapture --test-threads=1
