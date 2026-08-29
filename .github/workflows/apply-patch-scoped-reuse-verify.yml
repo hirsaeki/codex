@@ -44,6 +44,10 @@ jobs:
         shell: pwsh
         run: cargo build -p codex-windows-sandbox --bin codex-windows-sandbox-setup --bin codex-command-runner
 
+      - name: Build P0 harness without running
+        shell: pwsh
+        run: cargo test -p codex-core --test windows_apply_patch_baseline --no-run
+
       - name: Prepare P0 measurement environment
         shell: pwsh
         run: |
@@ -58,4 +62,34 @@ jobs:
 
       - name: Verify scoped helper reuse with the P0 harness
         shell: pwsh
-        run: cargo test -p codex-core --test windows_apply_patch_baseline -- --nocapture --test-threads=1
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
+          $depsDir = Join-Path $metadata.target_directory 'debug\deps'
+          $testExe = Get-ChildItem -Path $depsDir -Filter 'windows_apply_patch_baseline-*.exe' |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if (-not $testExe) {
+            throw 'windows_apply_patch_baseline test executable was not found'
+          }
+
+          $artifactDir = Join-Path $env:RUNNER_TEMP 'apply-patch-scoped-reuse'
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $rawLog = Join-Path $artifactDir 'harness.log'
+
+          & $testExe.FullName --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $rawLog
+          $testExit = $LASTEXITCODE
+          if ($testExit -ne 0) {
+            Write-Host '--- P0 harness failure tail ---'
+            Get-Content $rawLog -Tail 100
+            exit $testExit
+          }
+
+      - name: Upload P0 harness output
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apply-patch-scoped-reuse-harness-${{ github.sha }}
+          path: ${{ runner.temp }}/apply-patch-scoped-reuse
+          if-no-files-found: warn
+          retention-days: 7
