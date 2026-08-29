@@ -1,0 +1,33 @@
+name: apply-patch scoped helper reuse verify
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-windows-apply-patch:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Check formatting
+        shell: pwsh
+        run: cargo fmt --all -- --check
+
+      - name: Build Windows sandbox helpers
+        shell: pwsh
+        run: cargo build -p codex-windows-sandbox --bin codex-windows-sandbox-setup --bin codex-command-runner
+
+      - name: Verify scoped helper reuse with the P0 harness
+        shell: pwsh
+        run: cargo test -p codex-core --test windows_apply_patch_baseline -- --nocapture
