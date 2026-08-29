@@ -146,7 +146,10 @@ impl ScopedFsHelper {
         })
     }
 
-    async fn run(&mut self, request: FsHelperRequest) -> FileSystemResult<FsHelperPayload> {
+    async fn run(
+        &mut self,
+        request: FsHelperRequest,
+    ) -> Result<FileSystemResult<FsHelperPayload>, io::Error> {
         let operation = fs_helper_operation(&request);
         let mut request_json = serde_json::to_vec(&request).map_err(|error| {
             io::Error::other(format!(
@@ -174,15 +177,15 @@ impl ScopedFsHelper {
                         "failed to decode fs sandbox helper message: {error}"
                     ))
                 })?;
-            match response {
+            Ok(match response {
                 FsHelperResponse::Ok(payload) => Ok(payload),
                 FsHelperResponse::Error(error) => Err(map_sandbox_error(error)),
-            }
+            })
         }
         .await;
         tracing::debug!(
             operation,
-            success = result.is_ok(),
+            success = matches!(&result, Ok(Ok(_))),
             elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0,
             "filesystem sandbox helper invocation completed"
         );
@@ -258,20 +261,38 @@ impl SandboxedFileSystem {
                 sandbox: sandbox.clone(),
             };
             let mut helper = slot.lock().await;
-            match helper.as_mut() {
-                Some(helper) if helper.key == key => return helper.run(request).await,
-                Some(_) => {}
-                None => {
+            let can_use_scoped_helper = match helper.as_ref() {
+                Some(scoped_helper) => scoped_helper.key == key,
+                None => true,
+            };
+            if can_use_scoped_helper {
+                if helper.is_none() {
                     let command = self
                         .sandbox_runner
                         .sandbox_command(sandbox)
                         .map_err(map_sandbox_error)?;
                     *helper = Some(ScopedFsHelper::start(key, command)?);
-                    return helper
-                        .as_mut()
-                        .expect("scoped filesystem helper was just installed")
-                        .run(request)
-                        .await;
+                }
+
+                let result = helper
+                    .as_mut()
+                    .expect("scoped filesystem helper is available")
+                    .run(request)
+                    .await;
+                match result {
+                    Ok(result) => return result,
+                    Err(error) => {
+                        let failed_helper = helper
+                            .take()
+                            .expect("failed scoped filesystem helper is available");
+                        if let Err(cleanup_error) = failed_helper.finish().await {
+                            tracing::warn!(
+                                %cleanup_error,
+                                "failed to clean up unusable apply_patch filesystem helper"
+                            );
+                        }
+                        return Err(error);
+                    }
                 }
             }
         }
