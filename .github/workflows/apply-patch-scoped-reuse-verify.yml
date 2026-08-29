@@ -6,79 +6,92 @@ on:
       - perf/apply-patch-scoped-fs-helper-reuse
     paths:
       - '.github/workflows/apply-patch-scoped-reuse-verify.yml'
-      - 'codex-rs/core/src/tools/runtimes/apply_patch.rs'
-      - 'codex-rs/core/tests/windows_apply_patch_baseline.rs'
-      - 'codex-rs/exec-server/src/fs_helper_main.rs'
-      - 'codex-rs/exec-server/src/fs_sandbox.rs'
-      - 'codex-rs/exec-server/src/lib.rs'
-      - 'codex-rs/exec-server/src/local_file_system.rs'
-      - 'codex-rs/exec-server/src/sandboxed_file_system.rs'
-      - 'codex-rs/file-system/**'
-      - 'codex-rs/sandboxing/**'
-      - 'codex-rs/windows-sandbox-rs/**'
-      - 'codex-rs/apply-patch/**'
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
+
+env:
+  # Pin verification to the known-good build artifact. Workflow/harness
+  # orchestration changes must not silently move to a stale or unrelated build.
+  P1R_BUILD_RUN_ID: '33263842590'
+  P1R_BUILD_SHA: 'c80c96802b112dca2e941ba70ed42b92e9e3dac5'
 
 jobs:
   verify-windows-apply-patch:
     runs-on: windows-latest
-    timeout-minutes: 90
-    defaults:
-      run:
-        working-directory: codex-rs
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Download reusable P1R binaries
+        uses: actions/download-artifact@v4
         with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-ci
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+          name: windows-apply-patch-scoped-reuse-bin-${{ env.P1R_BUILD_SHA }}
+          path: ${{ runner.temp }}/apply-patch-scoped-reuse-bin
+          repository: ${{ github.repository }}
+          run-id: ${{ env.P1R_BUILD_RUN_ID }}
+          github-token: ${{ github.token }}
 
-      - name: Check formatting
+      - name: Validate artifact provenance
         shell: pwsh
-        run: cargo fmt --all -- --check
-
-      - name: Build Windows sandbox helpers
-        shell: pwsh
-        run: cargo build -p codex-windows-sandbox --bin codex-windows-sandbox-setup --bin codex-command-runner
-
-      - name: Build P0 harness without running
-        shell: pwsh
-        run: cargo test -p codex-core --test windows_apply_patch_baseline --no-run
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binDir = Join-Path $env:RUNNER_TEMP 'apply-patch-scoped-reuse-bin'
+          $actualSha = (Get-Content (Join-Path $binDir 'commit-sha.txt') -Raw).Trim()
+          if ($actualSha -ne $env:P1R_BUILD_SHA) {
+            throw "artifact SHA $actualSha did not match pinned build SHA $env:P1R_BUILD_SHA"
+          }
+          foreach ($file in @(
+            'windows_apply_patch_baseline.exe',
+            'codex-windows-sandbox-setup.exe',
+            'codex-command-runner.exe'
+          )) {
+            if (-not (Test-Path (Join-Path $binDir $file))) {
+              throw "missing reusable verification binary: $file"
+            }
+          }
+          Write-Host "Using P1R build run $env:P1R_BUILD_RUN_ID at $actualSha"
 
       - name: Prepare P0 measurement environment
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
-          $debugDir = Join-Path $metadata.target_directory 'debug'
+          $binDir = Join-Path $env:RUNNER_TEMP 'apply-patch-scoped-reuse-bin'
           $codexHome = Join-Path $env:RUNNER_TEMP 'codex-apply-patch-scoped-reuse-home'
           Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $codexHome
           New-Item -ItemType Directory -Force -Path $codexHome | Out-Null
           "CODEX_HOME=$codexHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "$debugDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "$binDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Verify scoped helper reuse with the P0 harness
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
-          $depsDir = Join-Path $metadata.target_directory 'debug\deps'
-          $testExe = Get-ChildItem -Path $depsDir -Filter 'windows_apply_patch_baseline-*.exe' |
-            Sort-Object LastWriteTimeUtc -Descending |
-            Select-Object -First 1
-          if (-not $testExe) {
-            throw 'windows_apply_patch_baseline test executable was not found'
-          }
+          $binDir = Join-Path $env:RUNNER_TEMP 'apply-patch-scoped-reuse-bin'
+          $resultDir = Join-Path $env:RUNNER_TEMP 'apply-patch-scoped-reuse-result'
+          New-Item -ItemType Directory -Force -Path $resultDir | Out-Null
+          $rawLog = Join-Path $resultDir 'harness.log'
+          $testExe = Join-Path $binDir 'windows_apply_patch_baseline.exe'
 
-          $artifactDir = Join-Path $env:RUNNER_TEMP 'apply-patch-scoped-reuse'
-          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
-          $rawLog = Join-Path $artifactDir 'harness.log'
-
-          & $testExe.FullName --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $rawLog
+          & $testExe --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $rawLog
           $testExit = $LASTEXITCODE
+
+          $sandboxLogDir = Join-Path $env:CODEX_HOME '.sandbox'
+          if (Test-Path $sandboxLogDir) {
+            Get-ChildItem -Path $sandboxLogDir -Filter 'sandbox.*.log' -ErrorAction SilentlyContinue |
+              Copy-Item -Destination $resultDir -Force
+          }
+          @(
+            "build_sha=$env:P1R_BUILD_SHA"
+            "build_run_id=$env:P1R_BUILD_RUN_ID"
+            "verify_sha=$env:GITHUB_SHA"
+            "runner_os=$env:RUNNER_OS"
+            "runner_arch=$env:RUNNER_ARCH"
+            "image_os=$env:ImageOS"
+            "image_version=$env:ImageVersion"
+            'windows_sandbox_level=elevated'
+          ) | Set-Content (Join-Path $resultDir 'metadata.txt')
+
           if ($testExit -ne 0) {
             Write-Host '--- P0 harness failure tail ---'
             Get-Content $rawLog -Tail 100
@@ -89,7 +102,7 @@ jobs:
         if: always() && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: apply-patch-scoped-reuse-harness-${{ github.sha }}
-          path: ${{ runner.temp }}/apply-patch-scoped-reuse
+          name: apply-patch-scoped-reuse-result-${{ env.P1R_BUILD_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/apply-patch-scoped-reuse-result
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 14
