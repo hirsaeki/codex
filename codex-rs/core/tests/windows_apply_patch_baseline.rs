@@ -167,14 +167,16 @@ async fn run_patch(
     let started_at = Instant::now();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    let result = codex_apply_patch::apply_patch_with_options(
-        patch,
-        ApplyPatchOptions::default(),
-        cwd,
-        &mut stdout,
-        &mut stderr,
-        fs,
-        Some(sandbox),
+    let result = codex_exec_server::with_apply_patch_fs_helper_reuse(
+        codex_apply_patch::apply_patch_with_options(
+            patch,
+            ApplyPatchOptions::default(),
+            cwd,
+            &mut stdout,
+            &mut stderr,
+            fs,
+            Some(sandbox),
+        ),
     )
     .await;
     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
@@ -190,6 +192,16 @@ async fn run_patch(
         .with_context(|| format!("read sandbox log at {}", log_path.display()))?;
     let lines = log.lines().collect::<Vec<_>>();
     let stats = summarize_sandbox_log(&lines[log_line_count.min(lines.len())..]);
+    anyhow::ensure!(
+        stats.helper_starts == 1,
+        "{operation} expected exactly one apply_patch-scoped fs helper, got {}",
+        stats.helper_starts
+    );
+    anyhow::ensure!(
+        stats.setup_refreshes == 1,
+        "{operation} expected exactly one sandbox setup refresh, got {}",
+        stats.setup_refreshes
+    );
     let result = BaselineResult {
         operation,
         elapsed_ms,
