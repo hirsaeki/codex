@@ -1,0 +1,106 @@
+name: apply-patch scoped helper reuse verify
+
+on:
+  push:
+    branches:
+      - verify/apply-patch-scoped-fs-helper-review-fix
+    paths:
+      - '.github/workflows/apply-patch-scoped-reuse-verify.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  P1R_BUILD_RUN_ID: '33269945724'
+  P1R_BUILD_SHA: '756fcd428ca15e582ed21a498379b8cfcd062ad7'
+
+jobs:
+  verify-windows-apply-patch:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download reusable P1R binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-apply-patch-scoped-reuse-bin-${{ env.P1R_BUILD_SHA }}
+          path: ${{ runner.temp }}/apply-patch-scoped-reuse-bin
+          repository: ${{ github.repository }}
+          run-id: ${{ env.P1R_BUILD_RUN_ID }}
+          github-token: ${{ github.token }}
+
+      - name: Validate artifact provenance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binDir = Join-Path $env:RUNNER_TEMP 'apply-patch-scoped-reuse-bin'
+          $actualSha = (Get-Content (Join-Path $binDir 'commit-sha.txt') -Raw).Trim()
+          if ($actualSha -ne $env:P1R_BUILD_SHA) {
+            throw "artifact SHA $actualSha did not match pinned build SHA $env:P1R_BUILD_SHA"
+          }
+          foreach ($file in @(
+            'windows_apply_patch_baseline.exe',
+            'codex-windows-sandbox-setup.exe',
+            'codex-command-runner.exe'
+          )) {
+            if (-not (Test-Path (Join-Path $binDir $file))) {
+              throw "missing reusable verification binary: $file"
+            }
+          }
+          Write-Host "Using P1R build run $env:P1R_BUILD_RUN_ID at $actualSha"
+
+      - name: Prepare P0 measurement environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binDir = Join-Path $env:RUNNER_TEMP 'apply-patch-scoped-reuse-bin'
+          $codexHome = Join-Path $env:RUNNER_TEMP 'codex-apply-patch-scoped-reuse-home'
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $codexHome
+          New-Item -ItemType Directory -Force -Path $codexHome | Out-Null
+          "CODEX_HOME=$codexHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$binDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Verify scoped helper reuse with the P0 harness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binDir = Join-Path $env:RUNNER_TEMP 'apply-patch-scoped-reuse-bin'
+          $resultDir = Join-Path $env:RUNNER_TEMP 'apply-patch-scoped-reuse-result'
+          New-Item -ItemType Directory -Force -Path $resultDir | Out-Null
+          $rawLog = Join-Path $resultDir 'harness.log'
+          $testExe = Join-Path $binDir 'windows_apply_patch_baseline.exe'
+
+          & $testExe --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $rawLog
+          $testExit = $LASTEXITCODE
+
+          $sandboxLogDir = Join-Path $env:CODEX_HOME '.sandbox'
+          if (Test-Path $sandboxLogDir) {
+            Get-ChildItem -Path $sandboxLogDir -Filter 'sandbox.*.log' -ErrorAction SilentlyContinue |
+              Copy-Item -Destination $resultDir -Force
+          }
+          @(
+            "build_sha=$env:P1R_BUILD_SHA"
+            "build_run_id=$env:P1R_BUILD_RUN_ID"
+            "verify_sha=$env:GITHUB_SHA"
+            "runner_os=$env:RUNNER_OS"
+            "runner_arch=$env:RUNNER_ARCH"
+            "image_os=$env:ImageOS"
+            "image_version=$env:ImageVersion"
+            'windows_sandbox_level=elevated'
+          ) | Set-Content (Join-Path $resultDir 'metadata.txt')
+
+          if ($testExit -ne 0) {
+            Write-Host '--- P0 harness failure tail ---'
+            Get-Content $rawLog -Tail 100
+            exit $testExit
+          }
+
+      - name: Upload P0 harness output
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: apply-patch-scoped-reuse-result-${{ env.P1R_BUILD_SHA }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/apply-patch-scoped-reuse-result
+          if-no-files-found: warn
+          retention-days: 14
