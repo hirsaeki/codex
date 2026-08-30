@@ -7,34 +7,50 @@ on:
     branches: [main]
 
 jobs:
-  # Keep reusable workflow calls alphabetized. Each child retains its own
-  # workflow_dispatch trigger so maintainers can rerun flaky suites directly.
   rust-ci-full:
+    if: ${{ vars.CODEX_CI_RUNNER_PROFILE == 'upstream' }}
     name: rust-ci-full
     uses: ./.github/workflows/rust-ci-full.yml
     secrets: inherit
 
   v8-canary:
+    if: ${{ vars.CODEX_CI_RUNNER_PROFILE == 'upstream' }}
     name: v8-canary
     uses: ./.github/workflows/v8-canary.yml
+    secrets: inherit
+
+  public-ci-full:
+    if: ${{ vars.CODEX_CI_RUNNER_PROFILE != 'upstream' }}
+    name: public-ci-full
+    uses: ./.github/workflows/public-ci.yml
+    with:
+      full: true
     secrets: inherit
 
   results:
     name: Postmerge CI results
     needs:
+      - public-ci-full
       - rust-ci-full
       - v8-canary
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     steps:
-      # Postmerge runs use the pushed main commit, so this helper always comes
-      # from the same revision that defined the parent workflow.
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Require successful dependencies
+      - name: Require successful dependencies for selected runner profile
+        shell: bash
         env:
-          NEEDS: ${{ toJSON(needs) }}
-        run: python3 .github/scripts/check_ci_results.py
+          RUNNER_PROFILE: ${{ vars.CODEX_CI_RUNNER_PROFILE }}
+          PUBLIC_CI_FULL: ${{ needs.public-ci-full.result }}
+          RUST_CI_FULL: ${{ needs.rust-ci-full.result }}
+          V8_CANARY: ${{ needs.v8-canary.result }}
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_PROFILE}" == upstream ]]; then
+            [[ "${RUST_CI_FULL}" == success ]] || { echo "rust-ci-full: ${RUST_CI_FULL}" >&2; exit 1; }
+            [[ "${V8_CANARY}" == success ]] || { echo "v8-canary: ${V8_CANARY}" >&2; exit 1; }
+            [[ "${PUBLIC_CI_FULL}" == skipped ]] || { echo "public-ci-full should be skipped; got ${PUBLIC_CI_FULL}" >&2; exit 1; }
+          else
+            [[ "${PUBLIC_CI_FULL}" == success ]] || { echo "public-ci-full: ${PUBLIC_CI_FULL}" >&2; exit 1; }
+            [[ "${RUST_CI_FULL}" == skipped ]] || { echo "rust-ci-full should be skipped; got ${RUST_CI_FULL}" >&2; exit 1; }
+            [[ "${V8_CANARY}" == skipped ]] || { echo "v8-canary should be skipped; got ${V8_CANARY}" >&2; exit 1; }
+          fi

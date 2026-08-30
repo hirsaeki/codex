@@ -1,0 +1,279 @@
+name: public-ci
+
+on:
+  workflow_call:
+    inputs:
+      full:
+        required: false
+        default: false
+        type: boolean
+  workflow_dispatch:
+
+# Public forks intentionally use only standard GitHub-hosted runner labels.
+# OpenAI/enterprise repositories can opt back into the upstream runner topology
+# by setting the repository variable CODEX_CI_RUNNER_PROFILE=upstream.
+permissions:
+  contents: read
+
+jobs:
+  rust-fast:
+    name: Rust fast checks
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: rustfmt
+      - name: cargo fmt
+        run: cargo fmt -- --config imports_granularity=Item --check
+      - name: Rust benchmark smoke test
+        run: just bench-smoke
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: cargo-shear@1.11.2
+      - name: cargo shear
+        run: cargo shear --deny-warnings
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+  argument-comment-lint:
+    name: Argument comment lint - Windows smoke
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Run representative argument comment lint on codex-rs via Bazel
+        uses: ./.github/actions/run-argument-comment-lint
+        with:
+          target: Windows
+          buildbuddy-api-key: ${{ secrets.BUILDBUDDY_API_KEY }}
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+  bazel-linux:
+    name: Bazel smoke - Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Prepare Bazel CI
+        id: prepare_bazel
+        uses: ./.github/actions/prepare-bazel-ci
+        with:
+          target: x86_64-unknown-linux-gnu
+          cache-scope: public-bazel-x86_64-unknown-linux-gnu
+      - name: Check rusty_v8 MODULE.bazel checksums
+        run: |
+          python3 .github/scripts/rusty_v8_bazel.py check-module-bazel
+          just test-github-scripts
+      - name: Check MODULE.bazel.lock is up to date
+        run: ./scripts/check-module-bazel-lock.sh
+      - name: bazel test representative Rust unit target
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        shell: bash
+        run: |
+          ./.github/scripts/run-bazel-ci.sh \
+            --print-failed-action-summary \
+            --print-failed-test-logs \
+            -- \
+            test \
+            --test_tag_filters=-argument-comment-lint \
+            --test_verbose_timeout_warnings \
+            --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
+            -- \
+            //codex-rs/utils/absolute-path:absolute-path-unit-tests
+      - name: Save Bazel repository cache
+        if: always() && !cancelled() && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ steps.prepare_bazel.outputs.repository-cache-path }}
+          key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+  cargo-platform:
+    name: Cargo check - ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - name: Windows x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+      - name: cargo check workspace
+        run: cargo check --workspace --all-targets --target ${{ matrix.target }}
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+  sdk-python:
+    name: Python SDK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Test Python SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp/codex-python-sdk-home \
+            -e UV_LINK_MODE=copy \
+            -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" \
+            -w "${GITHUB_WORKSPACE}/sdk/python" \
+            python:3.12-slim \
+            sh -euxc '
+              python -m venv /tmp/uv
+              /tmp/uv/bin/python -m pip install uv==0.11.3
+              /tmp/uv/bin/uv sync --group dev --frozen
+              /tmp/uv/bin/uv run --frozen --no-sync ruff check --output-format=github .
+              /tmp/uv/bin/uv run --frozen --no-sync ruff format --check .
+              /tmp/uv/bin/uv run --frozen --no-sync pytest
+            '
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+  sdk-typescript:
+    name: TypeScript SDK build and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
+        with:
+          run_install: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build SDK packages
+        run: pnpm -r --filter ./sdk/typescript run build
+      - name: Lint SDK packages
+        run: pnpm -r --filter ./sdk/typescript run lint
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+  full-platform-smoke:
+    name: Full profile smoke - ${{ matrix.name }}
+    if: ${{ inputs.full }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: Windows arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+      - name: cargo check core workspace targets
+        run: cargo check --workspace --target ${{ matrix.target }}
+
+  results:
+    name: Public CI results
+    if: always()
+    needs:
+      - rust-fast
+      - argument-comment-lint
+      - bazel-linux
+      - cargo-platform
+      - sdk-python
+      - sdk-typescript
+      - full-platform-smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require successful public CI dependencies
+        shell: bash
+        env:
+          FULL: ${{ inputs.full && 'true' || 'false' }}
+          RUST_FAST: ${{ needs.rust-fast.result }}
+          ARGUMENT_LINT: ${{ needs.argument-comment-lint.result }}
+          BAZEL_LINUX: ${{ needs.bazel-linux.result }}
+          CARGO_PLATFORM: ${{ needs.cargo-platform.result }}
+          SDK_PYTHON: ${{ needs.sdk-python.result }}
+          SDK_TYPESCRIPT: ${{ needs.sdk-typescript.result }}
+          FULL_PLATFORM: ${{ needs.full-platform-smoke.result }}
+        run: |
+          set -euo pipefail
+          for pair in \
+            "rust-fast:${RUST_FAST}" \
+            "argument-comment-lint:${ARGUMENT_LINT}" \
+            "bazel-linux:${BAZEL_LINUX}" \
+            "cargo-platform:${CARGO_PLATFORM}" \
+            "sdk-python:${SDK_PYTHON}" \
+            "sdk-typescript:${SDK_TYPESCRIPT}"; do
+            name="${pair%%:*}"
+            result="${pair#*:}"
+            if [[ "${result}" != success ]]; then
+              echo "${name} finished with ${result}" >&2
+              exit 1
+            fi
+          done
+          if [[ "${FULL}" == true && "${FULL_PLATFORM}" != success ]]; then
+            echo "full-platform-smoke finished with ${FULL_PLATFORM}" >&2
+            exit 1
+          fi
+          if [[ "${FULL}" != true && "${FULL_PLATFORM}" != skipped ]]; then
+            echo "full-platform-smoke should be skipped for the fast profile; got ${FULL_PLATFORM}" >&2
+            exit 1
+          fi
