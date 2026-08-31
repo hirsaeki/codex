@@ -2,6 +2,8 @@
 // from the eventual unsafe cleanup.
 #![allow(unsafe_op_in_unsafe_fn)]
 
+extern crate self as codex_windows_sandbox;
+
 #[cfg(any(target_os = "windows", test))]
 mod ssh_config_dependencies;
 
@@ -108,6 +110,9 @@ mod sandbox_utils;
 
 #[cfg(target_os = "windows")]
 mod setup;
+
+#[cfg(target_os = "windows")]
+mod setup_impl;
 
 #[cfg(target_os = "windows")]
 mod setup_error;
@@ -264,6 +269,11 @@ pub use setup::OFFLINE_USERNAME;
 pub use setup::ONLINE_USERNAME;
 #[cfg(target_os = "windows")]
 pub use setup::SETUP_VERSION;
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub fn run_setup_helper_main() -> anyhow::Result<()> {
+    setup_impl::main()
+}
 #[cfg(target_os = "windows")]
 pub use setup::SandboxSetupRequest;
 #[cfg(target_os = "windows")]

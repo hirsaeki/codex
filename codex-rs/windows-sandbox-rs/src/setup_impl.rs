@@ -83,33 +83,33 @@ use sandbox_users::resolve_sid;
 use sandbox_users::sid_bytes_to_psid;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct Payload {
-    version: u32,
-    offline_username: String,
-    online_username: String,
-    codex_home: PathBuf,
-    command_cwd: PathBuf,
-    read_roots: Vec<PathBuf>,
-    write_roots: Vec<PathBuf>,
+pub(crate) struct Payload {
+    pub(crate) version: u32,
+    pub(crate) offline_username: String,
+    pub(crate) online_username: String,
+    pub(crate) codex_home: PathBuf,
+    pub(crate) command_cwd: PathBuf,
+    pub(crate) read_roots: Vec<PathBuf>,
+    pub(crate) write_roots: Vec<PathBuf>,
     #[serde(default)]
-    deny_read_paths: Vec<PathBuf>,
+    pub(crate) deny_read_paths: Vec<PathBuf>,
     #[serde(default)]
-    deny_write_paths: Vec<PathBuf>,
-    proxy_ports: Vec<u16>,
+    pub(crate) deny_write_paths: Vec<PathBuf>,
+    pub(crate) proxy_ports: Vec<u16>,
     #[serde(default)]
-    allow_local_binding: bool,
+    pub(crate) allow_local_binding: bool,
     #[serde(default)]
-    otel: Option<StatsigMetricsSettings>,
-    real_user: String,
+    pub(crate) otel: Option<StatsigMetricsSettings>,
+    pub(crate) real_user: String,
     #[serde(default)]
-    mode: SetupMode,
+    pub(crate) mode: SetupMode,
     #[serde(default)]
-    refresh_only: bool,
+    pub(crate) refresh_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
-enum SetupMode {
+pub(crate) enum SetupMode {
     #[default]
     Full,
     ProvisionOnly,
@@ -169,7 +169,7 @@ fn spawn_read_acl_helper(payload: &Payload, _log: &mut dyn Write) -> Result<()> 
     read_payload.refresh_only = true;
     let payload_json = serde_json::to_vec(&read_payload)?;
     let payload_b64 = BASE64.encode(payload_json);
-    let exe = std::env::current_exe().context("locate setup helper")?;
+    let exe = crate::setup::find_setup_exe();
     Command::new(&exe)
         .arg(payload_b64)
         .stdin(Stdio::null())
@@ -457,6 +457,10 @@ fn real_main() -> Result<()> {
             format!("failed to parse payload json: {err}"),
         ))
     })?;
+    run_payload(&payload)
+}
+
+pub(crate) fn run_payload(payload: &Payload) -> Result<()> {
     if payload.version != SETUP_VERSION {
         return Err(anyhow::Error::new(SetupFailure::new(
             SetupErrorCode::HelperRequestArgsFailed,
@@ -479,7 +483,7 @@ fn real_main() -> Result<()> {
             format!("open log in {} failed", sbx_dir.display()),
         ))
     })?;
-    let result = run_setup(&payload, &mut log, &sbx_dir);
+    let result = run_setup(payload, &mut log, &sbx_dir);
     if let Err(err) = &result {
         let _ = log_line(&mut log, &format!("setup error: {err:?}"));
         log_note(&format!("setup error: {err:?}"), Some(sbx_dir.as_path()));
@@ -1036,7 +1040,7 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
 }
 
 #[cfg(test)]
-#[path = "win_acl_tests.rs"]
+#[path = "setup_impl_acl_tests.rs"]
 mod acl_tests;
 
 #[cfg(test)]

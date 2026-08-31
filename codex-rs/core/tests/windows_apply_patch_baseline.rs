@@ -49,7 +49,8 @@ struct SandboxLogStats {
     helper_starts: usize,
     setup_refreshes: usize,
     setup_refresh_total_ms: f64,
-    setup_refresh_child_execution_ms: Option<f64>,
+    setup_refresh_execution_ms: Option<f64>,
+    setup_refresh_child_spawns: usize,
     sandbox_prepare_total_ms: Option<f64>,
     sandbox_runner_launch_total_ms: Option<f64>,
 }
@@ -62,8 +63,9 @@ struct BaselineResult<'a> {
     setup_refreshes: usize,
     first_fs_request_ms: f64,
     setup_refresh_total_ms: f64,
-    setup_refresh_child_execution_ms: f64,
-    setup_refresh_orchestration_estimated_ms: f64,
+    setup_refresh_execution_ms: f64,
+    setup_refresh_overhead_ms: f64,
+    setup_refresh_child_spawns: usize,
     sandbox_prepare_total_ms: f64,
     sandbox_prepare_excluding_refresh_ms: f64,
     sandbox_runner_launch_total_ms: f64,
@@ -262,9 +264,14 @@ async fn run_patch(
         "{operation} expected exactly one sandbox setup refresh, got {}",
         stats.setup_refreshes
     );
-    let setup_refresh_child_execution_ms = stats
-        .setup_refresh_child_execution_ms
-        .with_context(|| format!("missing setup refresh child execution timing for {operation}"))?;
+    anyhow::ensure!(
+        stats.setup_refresh_child_spawns == 0,
+        "{operation} expected refresh-only setup to execute in-process, got {} child spawns",
+        stats.setup_refresh_child_spawns
+    );
+    let setup_refresh_execution_ms = stats.setup_refresh_execution_ms.with_context(|| {
+        format!("missing setup refresh in-process execution timing for {operation}")
+    })?;
     let sandbox_prepare_total_ms = stats
         .sandbox_prepare_total_ms
         .with_context(|| format!("missing elevated sandbox preparation timing for {operation}"))?;
@@ -278,9 +285,9 @@ async fn run_patch(
         setup_refreshes: stats.setup_refreshes,
         first_fs_request_ms,
         setup_refresh_total_ms: stats.setup_refresh_total_ms,
-        setup_refresh_child_execution_ms,
-        setup_refresh_orchestration_estimated_ms: stats.setup_refresh_total_ms
-            - setup_refresh_child_execution_ms,
+        setup_refresh_execution_ms,
+        setup_refresh_overhead_ms: stats.setup_refresh_total_ms - setup_refresh_execution_ms,
+        setup_refresh_child_spawns: stats.setup_refresh_child_spawns,
         sandbox_prepare_total_ms,
         sandbox_prepare_excluding_refresh_ms: sandbox_prepare_total_ms
             - stats.setup_refresh_total_ms,
@@ -318,8 +325,10 @@ fn summarize_sandbox_log(lines: &[&str]) -> SandboxLogStats {
             if let Some(value) = elapsed_ms_from_line(line) {
                 stats.setup_refresh_total_ms += value;
             }
-        } else if line.contains("setup refresh child execution: completed success=") {
-            stats.setup_refresh_child_execution_ms = elapsed_ms_from_line(line);
+        } else if line.contains("setup refresh in-process execution: completed success=") {
+            stats.setup_refresh_execution_ms = elapsed_ms_from_line(line);
+        } else if line.contains("setup refresh: spawning ") {
+            stats.setup_refresh_child_spawns += 1;
         } else if line.contains("elevated sandbox preparation: completed success=") {
             stats.sandbox_prepare_total_ms = elapsed_ms_from_line(line);
         } else if line.contains("elevated sandbox runner launch: completed success=") {

@@ -31,6 +31,8 @@ use crate::setup_error::clear_setup_error_report;
 use crate::setup_error::extract_failure;
 use crate::setup_error::failure;
 use crate::setup_error::read_setup_error_report;
+use crate::setup_impl::Payload as ElevationPayload;
+use crate::setup_impl::SetupMode;
 use crate::ssh_config_dependencies::ssh_config_dependency_paths;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -350,62 +352,37 @@ fn run_setup_refresh_inner(
         refresh_only: true,
     };
     let json = serde_json::to_vec(&payload)?;
-    let b64 = BASE64_STANDARD.encode(json);
-    run_setup_singleflight(b64.clone(), || {
-        run_setup_refresh_payload(&b64, request.codex_home)
+    let singleflight_key = BASE64_STANDARD.encode(json);
+    run_setup_singleflight(singleflight_key, || {
+        run_setup_refresh_payload(&payload, request.codex_home)
     })
 }
 
-fn run_setup_refresh_payload(b64: &str, codex_home: &Path) -> Result<()> {
-    let exe = find_setup_exe();
+fn run_setup_refresh_payload(payload: &ElevationPayload, codex_home: &Path) -> Result<()> {
     let sbx_dir = sandbox_dir(codex_home);
-    let log_path = current_log_file_path(&sbx_dir);
     let cleared_report = match clear_setup_error_report(codex_home) {
         Ok(()) => true,
         Err(err) => {
             log_note(
-                &format!("setup refresh: failed to clear setup_error.json before launch: {err}"),
+                &format!("setup refresh: failed to clear setup_error.json before execution: {err}"),
                 Some(&sbx_dir),
             );
             false
         }
     };
-    // Refresh should never request elevation; ensure verb isn't set and we don't trigger UAC.
-    let mut cmd = Command::new(&exe);
-    cmd.arg(b64)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let cwd = std::env::current_dir().unwrap_or_else(|_| codex_home.to_path_buf());
+    log_note("setup refresh: running in-process", Some(&sbx_dir));
+    let started_at = std::time::Instant::now();
+    let result = crate::setup_impl::run_payload(payload);
     log_note(
         &format!(
-            "setup refresh: spawning {} (cwd={}, payload_len={})",
-            exe.display(),
-            cwd.display(),
-            b64.len()
+            "setup refresh in-process execution: completed success={} elapsed_ms={:.3}",
+            result.is_ok(),
+            started_at.elapsed().as_secs_f64() * 1000.0
         ),
         Some(&sbx_dir),
     );
-    let status = cmd.status().map_err(|err| {
-        let message = format!(
-            "setup refresh failed to launch helper: helper={}, cwd={}, log={}, error={err}",
-            exe.display(),
-            cwd.display(),
-            log_path.display()
-        );
-        log_note(&format!("setup refresh: {message}"), Some(&sbx_dir));
-        failure(SetupErrorCode::OrchestratorHelperLaunchFailed, message)
-    })?;
-    if !status.success() {
-        log_note(
-            &format!("setup refresh: exited with status {status:?}"),
-            Some(&sbx_dir),
-        );
-        return Err(report_helper_failure(
-            codex_home,
-            cleared_report,
-            status.code(),
-        ));
+    if result.is_err() {
+        return Err(report_helper_failure(codex_home, cleared_report, Some(1)));
     }
     if let Err(err) = clear_setup_error_report(codex_home) {
         log_note(
@@ -666,36 +643,6 @@ pub(crate) fn effective_write_roots_for_permissions(
     filter_sensitive_write_roots(write_roots, codex_home)
 }
 
-#[derive(Serialize)]
-struct ElevationPayload {
-    version: u32,
-    offline_username: String,
-    online_username: String,
-    codex_home: PathBuf,
-    command_cwd: PathBuf,
-    read_roots: Vec<PathBuf>,
-    write_roots: Vec<PathBuf>,
-    #[serde(default)]
-    deny_read_paths: Vec<PathBuf>,
-    #[serde(default)]
-    deny_write_paths: Vec<PathBuf>,
-    proxy_ports: Vec<u16>,
-    #[serde(default)]
-    allow_local_binding: bool,
-    otel: Option<codex_otel::StatsigMetricsSettings>,
-    real_user: String,
-    mode: SetupMode,
-    #[serde(default)]
-    refresh_only: bool,
-}
-
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum SetupMode {
-    Full,
-    ProvisionOnly,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OfflineProxySettings {
     pub proxy_ports: Vec<u16>,
@@ -849,7 +796,7 @@ fn quote_arg(arg: &str) -> String {
     out
 }
 
-fn find_setup_exe() -> PathBuf {
+pub(crate) fn find_setup_exe() -> PathBuf {
     if let Ok(exe) = std::env::current_exe()
         && let Some(setup_exe) = find_setup_exe_for_current_exe(&exe)
     {
