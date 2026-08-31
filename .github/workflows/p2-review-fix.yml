@@ -26,47 +26,44 @@ jobs:
           from pathlib import Path
 
           impl = Path('codex-rs/windows-sandbox-rs/src/setup_impl.rs')
-          text = impl.read_text(encoding='utf-8')
-          anchor = '''    let sandbox_group_psid = sid_bytes_to_psid(&sandbox_group_sid).map_err(|err| {
-              anyhow::Error::new(SetupFailure::new(
-                  SetupErrorCode::HelperSidResolveFailed,
-                  format!("convert sandbox users group SID to PSID failed: {err}"),
-              ))
-          })?;
-          let sandbox_group_sid_str =
-          '''
-          replacement = '''    let sandbox_group_psid = sid_bytes_to_psid(&sandbox_group_sid).map_err(|err| {
-              anyhow::Error::new(SetupFailure::new(
-                  SetupErrorCode::HelperSidResolveFailed,
-                  format!("convert sandbox users group SID to PSID failed: {err}"),
-              ))
-          })?;
-          struct SandboxGroupPsidGuard(*mut c_void);
-          impl Drop for SandboxGroupPsidGuard {
-              fn drop(&mut self) {
-                  unsafe {
-                      if !self.0.is_null() {
-                          LocalFree(self.0 as HLOCAL);
-                      }
-                  }
-              }
-          }
-          let _sandbox_group_psid_guard = SandboxGroupPsidGuard(sandbox_group_psid);
-          let sandbox_group_sid_str =
-          '''
-          if text.count(anchor) != 1:
-              raise SystemExit(f'expected one sandbox_group_psid anchor, found {text.count(anchor)}')
-          text = text.replace(anchor, replacement, 1)
-          old_free = '''    unsafe {
-              if !sandbox_group_psid.is_null() {
-                  LocalFree(sandbox_group_psid as HLOCAL);
-              }
-          }
-          '''
-          if text.count(old_free) != 1:
-              raise SystemExit(f'expected one final sandbox_group_psid free, found {text.count(old_free)}')
-          text = text.replace(old_free, '', 1)
-          impl.write_text(text, encoding='utf-8')
+          lines = impl.read_text(encoding='utf-8').splitlines(keepends=True)
+          starts = [
+              i for i, line in enumerate(lines)
+              if line.strip() == 'let sandbox_group_psid = sid_bytes_to_psid(&sandbox_group_sid).map_err(|err| {'
+          ]
+          if len(starts) != 1:
+              raise SystemExit(f'expected one sandbox_group_psid start, found {len(starts)}')
+          start = starts[0]
+          insert_at = next(
+              i for i in range(start + 1, len(lines))
+              if lines[i].strip() == 'let sandbox_group_sid_str ='
+          )
+          guard = [
+              "    struct SandboxGroupPsidGuard(*mut c_void);\n",
+              "    impl Drop for SandboxGroupPsidGuard {\n",
+              "        fn drop(&mut self) {\n",
+              "            unsafe {\n",
+              "                if !self.0.is_null() {\n",
+              "                    LocalFree(self.0 as HLOCAL);\n",
+              "                }\n",
+              "            }\n",
+              "        }\n",
+              "    }\n",
+              "    let _sandbox_group_psid_guard = SandboxGroupPsidGuard(sandbox_group_psid);\n",
+          ]
+          lines[insert_at:insert_at] = guard
+
+          free_ifs = [
+              i for i in range(insert_at + len(guard), len(lines))
+              if lines[i].strip() == 'if !sandbox_group_psid.is_null() {'
+          ]
+          if len(free_ifs) != 1:
+              raise SystemExit(f'expected one final sandbox_group_psid free, found {len(free_ifs)}')
+          free_if = free_ifs[0]
+          if lines[free_if - 1].strip() != 'unsafe {' or lines[free_if + 2].strip() != '}' or lines[free_if + 3].strip() != '}':
+              raise SystemExit('unexpected final sandbox_group_psid free shape')
+          del lines[free_if - 1:free_if + 4]
+          impl.write_text(''.join(lines), encoding='utf-8')
 
           setup = Path('codex-rs/windows-sandbox-rs/src/setup.rs')
           text = setup.read_text(encoding='utf-8')
