@@ -45,7 +45,7 @@ struct SandboxLogStats {
     setup_refreshes: usize,
     setup_refresh_total_ms: f64,
     setup_refresh_child_main_ms: Option<f64>,
-    sandbox_credentials_total_ms: Option<f64>,
+    sandbox_prepare_total_ms: Option<f64>,
     sandbox_runner_launch_total_ms: Option<f64>,
 }
 
@@ -59,8 +59,8 @@ struct BaselineResult<'a> {
     setup_refresh_total_ms: f64,
     setup_refresh_child_main_ms: f64,
     setup_refresh_orchestration_estimated_ms: f64,
-    sandbox_credentials_total_ms: f64,
-    sandbox_credentials_excluding_refresh_ms: f64,
+    sandbox_prepare_total_ms: f64,
+    sandbox_prepare_excluding_refresh_ms: f64,
     sandbox_runner_launch_total_ms: f64,
     first_fs_unattributed_residual_ms: f64,
 }
@@ -254,9 +254,9 @@ async fn run_patch(
     let setup_refresh_child_main_ms = stats
         .setup_refresh_child_main_ms
         .with_context(|| format!("missing setup refresh child timing for {operation}"))?;
-    let sandbox_credentials_total_ms = stats
-        .sandbox_credentials_total_ms
-        .with_context(|| format!("missing sandbox credential timing for {operation}"))?;
+    let sandbox_prepare_total_ms = stats
+        .sandbox_prepare_total_ms
+        .with_context(|| format!("missing elevated sandbox preparation timing for {operation}"))?;
     let sandbox_runner_launch_total_ms = stats
         .sandbox_runner_launch_total_ms
         .with_context(|| format!("missing sandbox runner timing for {operation}"))?;
@@ -270,12 +270,12 @@ async fn run_patch(
         setup_refresh_child_main_ms,
         setup_refresh_orchestration_estimated_ms: stats.setup_refresh_total_ms
             - setup_refresh_child_main_ms,
-        sandbox_credentials_total_ms,
-        sandbox_credentials_excluding_refresh_ms: sandbox_credentials_total_ms
+        sandbox_prepare_total_ms,
+        sandbox_prepare_excluding_refresh_ms: sandbox_prepare_total_ms
             - stats.setup_refresh_total_ms,
         sandbox_runner_launch_total_ms,
         first_fs_unattributed_residual_ms: first_fs_request_ms
-            - sandbox_credentials_total_ms
+            - sandbox_prepare_total_ms
             - sandbox_runner_launch_total_ms,
     };
     println!(
@@ -291,7 +291,7 @@ fn first_fs_request_elapsed_ms(trace: &[u8]) -> Result<f64> {
     trace
         .lines()
         .find(|line| line.contains("filesystem sandbox helper invocation completed"))
-        .and_then(|line| elapsed_ms_from_line(line))
+        .and_then(elapsed_ms_from_line)
         .context("first filesystem helper completion was not present in tracing output")
 }
 
@@ -308,8 +308,8 @@ fn summarize_sandbox_log(lines: &[&str]) -> SandboxLogStats {
             }
         } else if line.contains("setup refresh child main: completed success=") {
             stats.setup_refresh_child_main_ms = elapsed_ms_from_line(line);
-        } else if line.contains("elevated sandbox credentials: completed success=") {
-            stats.sandbox_credentials_total_ms = elapsed_ms_from_line(line);
+        } else if line.contains("elevated sandbox preparation: completed success=") {
+            stats.sandbox_prepare_total_ms = elapsed_ms_from_line(line);
         } else if line.contains("elevated sandbox runner launch: completed success=") {
             stats.sandbox_runner_launch_total_ms = elapsed_ms_from_line(line);
         }
