@@ -85,6 +85,7 @@ async fn run_baseline() -> Result<()> {
         permissions: PermissionProfile::workspace_write().into(),
         cwd: Some(cwd.clone()),
         workspace_roots: vec![cwd.clone()],
+        user_home_dir: None,
         temporary_directories: None,
         windows_sandbox_level: WindowsSandboxLevel::Elevated,
         windows_sandbox_private_desktop: false,
