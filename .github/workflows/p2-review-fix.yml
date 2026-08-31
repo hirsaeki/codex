@@ -1,0 +1,90 @@
+name: Apply P2 review fixes
+
+on:
+  push:
+    branches:
+      - automation/p2-review-fix
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out P2 branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: perf/apply-patch-refresh-in-process-p2
+          fetch-depth: 1
+
+      - name: Apply accepted review fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          impl = Path('codex-rs/windows-sandbox-rs/src/setup_impl.rs')
+          text = impl.read_text(encoding='utf-8')
+          anchor = '''    let sandbox_group_psid = sid_bytes_to_psid(&sandbox_group_sid).map_err(|err| {
+              anyhow::Error::new(SetupFailure::new(
+                  SetupErrorCode::HelperSidResolveFailed,
+                  format!("convert sandbox users group SID to PSID failed: {err}"),
+              ))
+          })?;
+          let sandbox_group_sid_str =
+          '''
+          replacement = '''    let sandbox_group_psid = sid_bytes_to_psid(&sandbox_group_sid).map_err(|err| {
+              anyhow::Error::new(SetupFailure::new(
+                  SetupErrorCode::HelperSidResolveFailed,
+                  format!("convert sandbox users group SID to PSID failed: {err}"),
+              ))
+          })?;
+          struct SandboxGroupPsidGuard(*mut c_void);
+          impl Drop for SandboxGroupPsidGuard {
+              fn drop(&mut self) {
+                  unsafe {
+                      if !self.0.is_null() {
+                          LocalFree(self.0 as HLOCAL);
+                      }
+                  }
+              }
+          }
+          let _sandbox_group_psid_guard = SandboxGroupPsidGuard(sandbox_group_psid);
+          let sandbox_group_sid_str =
+          '''
+          if text.count(anchor) != 1:
+              raise SystemExit(f'expected one sandbox_group_psid anchor, found {text.count(anchor)}')
+          text = text.replace(anchor, replacement, 1)
+          old_free = '''    unsafe {
+              if !sandbox_group_psid.is_null() {
+                  LocalFree(sandbox_group_psid as HLOCAL);
+              }
+          }
+          '''
+          if text.count(old_free) != 1:
+              raise SystemExit(f'expected one final sandbox_group_psid free, found {text.count(old_free)}')
+          text = text.replace(old_free, '', 1)
+          impl.write_text(text, encoding='utf-8')
+
+          setup = Path('codex-rs/windows-sandbox-rs/src/setup.rs')
+          text = setup.read_text(encoding='utf-8')
+          unused = 'use crate::logging::current_log_file_path;\n'
+          if text.count(unused) != 1:
+              raise SystemExit(f'expected one unused import, found {text.count(unused)}')
+          setup.write_text(text.replace(unused, '', 1), encoding='utf-8')
+          PY
+          cd codex-rs
+          cargo fmt --all
+
+      - name: Commit and push fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add codex-rs/windows-sandbox-rs/src/setup.rs codex-rs/windows-sandbox-rs/src/setup_impl.rs
+          git diff --cached --check
+          git commit -m 'Address P2 setup review feedback'
+          git push origin HEAD:refs/heads/perf/apply-patch-refresh-in-process-p2
