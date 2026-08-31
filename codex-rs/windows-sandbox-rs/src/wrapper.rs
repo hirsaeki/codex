@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -34,6 +36,38 @@ const READ_ROOTS_JSON_FLAG: &str = "--read-roots-json";
 const SANDBOX_LEVEL_FLAG: &str = "--windows-sandbox-level";
 const WRITE_ROOTS_JSON_FLAG: &str = "--write-roots-json";
 const WORKSPACE_ROOT_FLAG: &str = "--workspace-root";
+
+#[derive(Clone, Copy)]
+struct ElevatedPhaseTimings {
+    preparation_ms: f64,
+    runner_launch_ms: f64,
+}
+
+static ELEVATED_PHASE_TIMINGS: OnceLock<Mutex<Option<ElevatedPhaseTimings>>> = OnceLock::new();
+
+pub(crate) fn record_elevated_phase_timings(preparation_ms: f64, runner_launch_ms: f64) {
+    if std::env::args().nth(1).as_deref() != Some(CODEX_WINDOWS_SANDBOX_ARG1) {
+        return;
+    }
+    *ELEVATED_PHASE_TIMINGS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ElevatedPhaseTimings {
+        preparation_ms,
+        runner_launch_ms,
+    });
+}
+
+fn take_elevated_phase_timings() -> Option<ElevatedPhaseTimings> {
+    ELEVATED_PHASE_TIMINGS
+        .get()
+        .and_then(|timings| {
+            timings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        })
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn create_windows_sandbox_command_args_for_permission_profile(
@@ -179,6 +213,7 @@ async fn run_windows_sandbox_wrapper_request(request: WindowsSandboxWrapperReque
     if request.command.is_empty() {
         bail!("missing sandboxed command in windows sandbox wrapper request");
     }
+    let measurement_log_dir = request.codex_home.join(".sandbox");
     let spawned =
         crate::spawn_windows_sandbox_session_for_level(crate::WindowsSandboxSessionRequest {
             permission_profile: &request.permission_profile,
@@ -203,7 +238,24 @@ async fn run_windows_sandbox_wrapper_request(request: WindowsSandboxWrapperReque
         })
         .await?;
 
-    Ok(crate::forward_sandbox_session_stdio(spawned).await)
+    let exit_code = crate::forward_sandbox_session_stdio(spawned).await;
+    if let Some(timings) = take_elevated_phase_timings() {
+        crate::logging::log_note(
+            &format!(
+                "elevated sandbox preparation: completed success=true elapsed_ms={:.3}",
+                timings.preparation_ms
+            ),
+            Some(measurement_log_dir.as_path()),
+        );
+        crate::logging::log_note(
+            &format!(
+                "elevated sandbox runner launch: completed success=true elapsed_ms={:.3}",
+                timings.runner_launch_ms
+            ),
+            Some(measurement_log_dir.as_path()),
+        );
+    }
+    Ok(exit_code)
 }
 
 fn parse_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<WindowsSandboxWrapperRequest> {

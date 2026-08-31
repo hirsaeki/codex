@@ -5,6 +5,8 @@ mod win;
 fn main() -> anyhow::Result<()> {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64;
+    use std::fs::OpenOptions;
+    use std::io::Write;
     use std::path::PathBuf;
     use std::time::Instant;
 
@@ -39,13 +41,14 @@ fn main() -> anyhow::Result<()> {
 
     if let Some(codex_home) = refresh_codex_home {
         let sandbox_dir = codex_windows_sandbox::sandbox_dir(&codex_home);
-        codex_windows_sandbox::log_note(
-            &format!(
-                "setup refresh child main: completed success={} elapsed_ms={elapsed_ms:.3}",
+        let log_path = codex_windows_sandbox::current_log_file_path(&sandbox_dir);
+        if let Ok(mut log) = OpenOptions::new().create(true).append(true).open(log_path) {
+            let _ = writeln!(
+                log,
+                "setup refresh child execution: completed success={} elapsed_ms={elapsed_ms:.3}",
                 result.is_ok()
-            ),
-            Some(sandbox_dir.as_path()),
-        );
+            );
+        }
     }
 
     result

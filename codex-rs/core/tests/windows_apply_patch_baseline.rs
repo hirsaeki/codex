@@ -23,7 +23,12 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
+use tracing::Instrument;
+
+static MEASUREMENT_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 #[ctor]
 static CODEX_DISPATCH: Option<TestBinaryDispatchGuard> = {
@@ -44,7 +49,7 @@ struct SandboxLogStats {
     helper_starts: usize,
     setup_refreshes: usize,
     setup_refresh_total_ms: f64,
-    setup_refresh_child_main_ms: Option<f64>,
+    setup_refresh_child_execution_ms: Option<f64>,
     sandbox_prepare_total_ms: Option<f64>,
     sandbox_runner_launch_total_ms: Option<f64>,
 }
@@ -57,7 +62,7 @@ struct BaselineResult<'a> {
     setup_refreshes: usize,
     first_fs_request_ms: f64,
     setup_refresh_total_ms: f64,
-    setup_refresh_child_main_ms: f64,
+    setup_refresh_child_execution_ms: f64,
     setup_refresh_orchestration_estimated_ms: f64,
     sandbox_prepare_total_ms: f64,
     sandbox_prepare_excluding_refresh_ms: f64,
@@ -206,10 +211,15 @@ async fn run_patch(
     trace_capture: &Arc<Mutex<Vec<u8>>>,
 ) -> Result<usize> {
     println!("APPLY_PATCH_BASELINE_BEGIN {operation}");
+    let measurement_id = format!(
+        "{operation}-{}",
+        MEASUREMENT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
     let trace_offset = trace_capture.lock().expect("trace capture lock").len();
     let started_at = Instant::now();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
+    let span = tracing::info_span!("apply_patch_p2m", measurement_id = %measurement_id);
     let result = codex_exec_server::with_apply_patch_fs_helper_reuse(
         codex_apply_patch::apply_patch_with_options(
             patch,
@@ -221,6 +231,7 @@ async fn run_patch(
             Some(sandbox),
         ),
     )
+    .instrument(span)
     .await;
     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
     if let Err(error) = result {
@@ -233,7 +244,7 @@ async fn run_patch(
 
     let trace = trace_capture.lock().expect("trace capture lock");
     let trace_slice = &trace[trace_offset.min(trace.len())..];
-    let first_fs_request_ms = first_fs_request_elapsed_ms(trace_slice)
+    let first_fs_request_ms = first_fs_request_elapsed_ms(trace_slice, &measurement_id)
         .with_context(|| format!("find first filesystem request timing for {operation}"))?;
     drop(trace);
 
@@ -251,9 +262,9 @@ async fn run_patch(
         "{operation} expected exactly one sandbox setup refresh, got {}",
         stats.setup_refreshes
     );
-    let setup_refresh_child_main_ms = stats
-        .setup_refresh_child_main_ms
-        .with_context(|| format!("missing setup refresh child timing for {operation}"))?;
+    let setup_refresh_child_execution_ms = stats
+        .setup_refresh_child_execution_ms
+        .with_context(|| format!("missing setup refresh child execution timing for {operation}"))?;
     let sandbox_prepare_total_ms = stats
         .sandbox_prepare_total_ms
         .with_context(|| format!("missing elevated sandbox preparation timing for {operation}"))?;
@@ -267,9 +278,9 @@ async fn run_patch(
         setup_refreshes: stats.setup_refreshes,
         first_fs_request_ms,
         setup_refresh_total_ms: stats.setup_refresh_total_ms,
-        setup_refresh_child_main_ms,
+        setup_refresh_child_execution_ms,
         setup_refresh_orchestration_estimated_ms: stats.setup_refresh_total_ms
-            - setup_refresh_child_main_ms,
+            - setup_refresh_child_execution_ms,
         sandbox_prepare_total_ms,
         sandbox_prepare_excluding_refresh_ms: sandbox_prepare_total_ms
             - stats.setup_refresh_total_ms,
@@ -286,13 +297,14 @@ async fn run_patch(
     Ok(lines.len())
 }
 
-fn first_fs_request_elapsed_ms(trace: &[u8]) -> Result<f64> {
+fn first_fs_request_elapsed_ms(trace: &[u8], measurement_id: &str) -> Result<f64> {
     let trace = String::from_utf8_lossy(trace);
     trace
         .lines()
+        .filter(|line| line.contains(measurement_id))
         .find(|line| line.contains("filesystem sandbox helper invocation completed"))
         .and_then(elapsed_ms_from_line)
-        .context("first filesystem helper completion was not present in tracing output")
+        .context("correlated first filesystem helper completion was not present in tracing output")
 }
 
 fn summarize_sandbox_log(lines: &[&str]) -> SandboxLogStats {
@@ -306,8 +318,8 @@ fn summarize_sandbox_log(lines: &[&str]) -> SandboxLogStats {
             if let Some(value) = elapsed_ms_from_line(line) {
                 stats.setup_refresh_total_ms += value;
             }
-        } else if line.contains("setup refresh child main: completed success=") {
-            stats.setup_refresh_child_main_ms = elapsed_ms_from_line(line);
+        } else if line.contains("setup refresh child execution: completed success=") {
+            stats.setup_refresh_child_execution_ms = elapsed_ms_from_line(line);
         } else if line.contains("elevated sandbox preparation: completed success=") {
             stats.sandbox_prepare_total_ms = elapsed_ms_from_line(line);
         } else if line.contains("elevated sandbox runner launch: completed success=") {

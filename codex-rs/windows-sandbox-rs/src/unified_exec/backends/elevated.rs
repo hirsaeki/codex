@@ -167,7 +167,6 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
     stdin_open: bool,
     use_private_desktop: bool,
 ) -> Result<SpawnedProcess> {
-    let measurement_log_dir = crate::setup::sandbox_dir(codex_home);
     let deny_read_paths_override = deny_read_paths_override
         .iter()
         .map(AbsolutePathBuf::to_path_buf)
@@ -183,7 +182,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
         )?;
 
     let preparation_started_at = Instant::now();
-    let elevated_result = prepare_elevated_spawn_context_for_permissions(
+    let elevated = prepare_elevated_spawn_context_for_permissions(
         permissions.clone(),
         codex_home,
         cwd,
@@ -196,16 +195,8 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
         &deny_write_paths_override,
         proxy_enforced,
         proxy_settings_mode,
-    );
-    crate::logging::log_note(
-        &format!(
-            "elevated sandbox preparation: completed success={} elapsed_ms={:.3}",
-            elevated_result.is_ok(),
-            preparation_started_at.elapsed().as_secs_f64() * 1000.0
-        ),
-        Some(measurement_log_dir.as_path()),
-    );
-    let elevated = elevated_result?;
+    )?;
+    let preparation_ms = preparation_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let sandbox_creds = elevated.sandbox_creds;
     let request = RunnerTransportRequest {
@@ -240,16 +231,9 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
     };
 
     let runner_started_at = Instant::now();
-    let transport_result = spawn_runner_transport_task(sandbox_creds, request).await;
-    crate::logging::log_note(
-        &format!(
-            "elevated sandbox runner launch: completed success={} elapsed_ms={:.3}",
-            transport_result.is_ok(),
-            runner_started_at.elapsed().as_secs_f64() * 1000.0
-        ),
-        Some(measurement_log_dir.as_path()),
-    );
-    let transport = transport_result?;
+    let transport = spawn_runner_transport_task(sandbox_creds, request).await?;
+    let runner_launch_ms = runner_started_at.elapsed().as_secs_f64() * 1000.0;
+    crate::wrapper::record_elevated_phase_timings(preparation_ms, runner_launch_ms);
     let (pipe_write, pipe_read) = transport.into_files();
 
     let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>(128);
