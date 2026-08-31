@@ -44,6 +44,7 @@ mod windows_impl {
     use crate::ipc_framed::read_frame;
     use crate::ipc_framed::write_frame;
     use crate::logging::log_failure;
+    use crate::logging::log_note;
     use crate::logging::log_start;
     use crate::logging::log_success;
     use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
@@ -62,6 +63,7 @@ mod windows_impl {
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
+    use std::time::Instant;
 
     pub use crate::windows_impl::CaptureResult;
 
@@ -144,7 +146,8 @@ mod windows_impl {
 
         let logs_base_dir: Option<&Path> = Some(sandbox_base.as_path());
         log_start(&command, logs_base_dir);
-        let sandbox_creds = require_logon_sandbox_creds(
+        let credentials_started_at = Instant::now();
+        let sandbox_creds_result = require_logon_sandbox_creds(
             &permissions,
             cwd,
             &env_map,
@@ -156,7 +159,16 @@ mod windows_impl {
             &deny_write_paths_override,
             proxy_enforced,
             crate::WindowsSandboxProxySettingsMode::Reconcile,
-        )?;
+        );
+        log_note(
+            &format!(
+                "elevated sandbox credentials: completed success={} elapsed_ms={:.3}",
+                sandbox_creds_result.is_ok(),
+                credentials_started_at.elapsed().as_secs_f64() * 1000.0
+            ),
+            logs_base_dir,
+        );
+        let sandbox_creds = sandbox_creds_result?;
         // Build capability SID for ACL grants.
         let caps = load_or_create_cap_sids(codex_home)?;
         let (sid_for_null, cap_sids) = if permissions.uses_write_capabilities_for_cwd(cwd, &env_map)
@@ -224,7 +236,8 @@ mod windows_impl {
                 use_private_desktop,
                 private_desktop_name: None,
             };
-            let transport = retry_runner_spawn_once(
+            let runner_launch_started_at = Instant::now();
+            let transport_result = retry_runner_spawn_once(
                 sandbox_creds,
                 &spawn_request.command,
                 |sandbox_creds| {
@@ -252,7 +265,16 @@ mod windows_impl {
                         crate::WindowsSandboxProxySettingsMode::Reconcile,
                     )
                 },
-            )?;
+            );
+            log_note(
+                &format!(
+                    "elevated sandbox runner launch: completed success={} elapsed_ms={:.3}",
+                    transport_result.is_ok(),
+                    runner_launch_started_at.elapsed().as_secs_f64() * 1000.0
+                ),
+                logs_base_dir,
+            );
+            let transport = transport_result?;
             let (pipe_write, mut pipe_read) = transport.into_files();
             let cancel_writer = spawn_cancel_writer(&pipe_write, cancellation)?;
 
