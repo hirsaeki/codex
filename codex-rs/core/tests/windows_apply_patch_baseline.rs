@@ -19,7 +19,10 @@ use codex_utils_path_uri::PathUri;
 use codex_windows_sandbox::CODEX_WINDOWS_SANDBOX_ARG1;
 use ctor::ctor;
 use serde::Serialize;
+use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Instant;
 
 #[ctor]
@@ -41,6 +44,9 @@ struct SandboxLogStats {
     helper_starts: usize,
     setup_refreshes: usize,
     setup_refresh_total_ms: f64,
+    setup_refresh_child_main_ms: Option<f64>,
+    sandbox_credentials_total_ms: Option<f64>,
+    sandbox_runner_launch_total_ms: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -49,16 +55,47 @@ struct BaselineResult<'a> {
     elapsed_ms: f64,
     fs_helper_starts: usize,
     setup_refreshes: usize,
+    first_fs_request_ms: f64,
     setup_refresh_total_ms: f64,
+    setup_refresh_child_main_ms: f64,
+    setup_refresh_orchestration_estimated_ms: f64,
+    sandbox_credentials_total_ms: f64,
+    sandbox_credentials_excluding_refresh_ms: f64,
+    sandbox_runner_launch_total_ms: f64,
+    first_fs_unattributed_residual_ms: f64,
+}
+
+struct TeeWriter {
+    capture: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        std::io::stderr().write_all(buf)?;
+        self.capture
+            .lock()
+            .expect("trace capture lock")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::stderr().flush()
+    }
 }
 
 #[test]
 fn native_windows_apply_patch_baseline() -> Result<()> {
+    let trace_capture = Arc::new(Mutex::new(Vec::new()));
+    let writer_capture = Arc::clone(&trace_capture);
     tracing_subscriber::fmt()
         .with_ansi(false)
         .without_time()
         .with_target(false)
         .with_max_level(tracing::Level::DEBUG)
+        .with_writer(move || TeeWriter {
+            capture: Arc::clone(&writer_capture),
+        })
         .try_init()
         .map_err(|error| anyhow::anyhow!("install baseline tracing subscriber: {error}"))?;
 
@@ -66,10 +103,10 @@ fn native_windows_apply_patch_baseline() -> Result<()> {
         .enable_all()
         .build()
         .context("build baseline runtime")?;
-    runtime.block_on(run_baseline())
+    runtime.block_on(run_baseline(trace_capture))
 }
 
-async fn run_baseline() -> Result<()> {
+async fn run_baseline(trace_capture: Arc<Mutex<Vec<u8>>>) -> Result<()> {
     let codex_home = codex_utils_home_dir::find_codex_home().context("resolve CODEX_HOME")?;
     let workspace = tempfile::tempdir().context("create baseline workspace")?;
     let workspace = AbsolutePathBuf::from_absolute_path(workspace.path())?;
@@ -114,6 +151,7 @@ async fn run_baseline() -> Result<()> {
         &sandbox,
         &log_path,
         log_line_count,
+        &trace_capture,
     )
     .await?;
     anyhow::ensure!(
@@ -129,6 +167,7 @@ async fn run_baseline() -> Result<()> {
         &sandbox,
         &log_path,
         log_line_count,
+        &trace_capture,
     )
     .await?;
     anyhow::ensure!(
@@ -144,6 +183,7 @@ async fn run_baseline() -> Result<()> {
         &sandbox,
         &log_path,
         log_line_count,
+        &trace_capture,
     )
     .await?;
     anyhow::ensure!(
@@ -163,8 +203,10 @@ async fn run_patch(
     sandbox: &FileSystemSandboxContext,
     log_path: &Path,
     log_line_count: usize,
+    trace_capture: &Arc<Mutex<Vec<u8>>>,
 ) -> Result<usize> {
     println!("APPLY_PATCH_BASELINE_BEGIN {operation}");
+    let trace_offset = trace_capture.lock().expect("trace capture lock").len();
     let started_at = Instant::now();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -189,6 +231,12 @@ async fn run_patch(
         );
     }
 
+    let trace = trace_capture.lock().expect("trace capture lock");
+    let trace_slice = &trace[trace_offset.min(trace.len())..];
+    let first_fs_request_ms = first_fs_request_elapsed_ms(trace_slice)
+        .with_context(|| format!("find first filesystem request timing for {operation}"))?;
+    drop(trace);
+
     let log = std::fs::read_to_string(log_path)
         .with_context(|| format!("read sandbox log at {}", log_path.display()))?;
     let lines = log.lines().collect::<Vec<_>>();
@@ -203,12 +251,32 @@ async fn run_patch(
         "{operation} expected exactly one sandbox setup refresh, got {}",
         stats.setup_refreshes
     );
+    let setup_refresh_child_main_ms = stats
+        .setup_refresh_child_main_ms
+        .with_context(|| format!("missing setup refresh child timing for {operation}"))?;
+    let sandbox_credentials_total_ms = stats
+        .sandbox_credentials_total_ms
+        .with_context(|| format!("missing sandbox credential timing for {operation}"))?;
+    let sandbox_runner_launch_total_ms = stats
+        .sandbox_runner_launch_total_ms
+        .with_context(|| format!("missing sandbox runner timing for {operation}"))?;
     let result = BaselineResult {
         operation,
         elapsed_ms,
         fs_helper_starts: stats.helper_starts,
         setup_refreshes: stats.setup_refreshes,
+        first_fs_request_ms,
         setup_refresh_total_ms: stats.setup_refresh_total_ms,
+        setup_refresh_child_main_ms,
+        setup_refresh_orchestration_estimated_ms: stats.setup_refresh_total_ms
+            - setup_refresh_child_main_ms,
+        sandbox_credentials_total_ms,
+        sandbox_credentials_excluding_refresh_ms: sandbox_credentials_total_ms
+            - stats.setup_refresh_total_ms,
+        sandbox_runner_launch_total_ms,
+        first_fs_unattributed_residual_ms: first_fs_request_ms
+            - sandbox_credentials_total_ms
+            - sandbox_runner_launch_total_ms,
     };
     println!(
         "APPLY_PATCH_BASELINE_RESULT {}",
@@ -218,22 +286,38 @@ async fn run_patch(
     Ok(lines.len())
 }
 
+fn first_fs_request_elapsed_ms(trace: &[u8]) -> Result<f64> {
+    let trace = String::from_utf8_lossy(trace);
+    trace
+        .lines()
+        .find(|line| line.contains("filesystem sandbox helper invocation completed"))
+        .and_then(|line| elapsed_ms_from_line(line))
+        .context("first filesystem helper completion was not present in tracing output")
+}
+
 fn summarize_sandbox_log(lines: &[&str]) -> SandboxLogStats {
     let mut stats = SandboxLogStats::default();
     for line in lines {
         if line.contains("START:") && line.contains(CODEX_FS_HELPER_ARG1) {
             stats.helper_starts += 1;
         }
-        let Some((_, completion)) = line.split_once("setup refresh: completed success=") else {
-            continue;
-        };
-        stats.setup_refreshes += 1;
-        if let Some((_, elapsed)) = completion.split_once(" elapsed_ms=")
-            && let Some(value) = elapsed.split_whitespace().next()
-            && let Ok(value) = value.parse::<f64>()
-        {
-            stats.setup_refresh_total_ms += value;
+        if line.contains("setup refresh: completed success=") {
+            stats.setup_refreshes += 1;
+            if let Some(value) = elapsed_ms_from_line(line) {
+                stats.setup_refresh_total_ms += value;
+            }
+        } else if line.contains("setup refresh child main: completed success=") {
+            stats.setup_refresh_child_main_ms = elapsed_ms_from_line(line);
+        } else if line.contains("elevated sandbox credentials: completed success=") {
+            stats.sandbox_credentials_total_ms = elapsed_ms_from_line(line);
+        } else if line.contains("elevated sandbox runner launch: completed success=") {
+            stats.sandbox_runner_launch_total_ms = elapsed_ms_from_line(line);
         }
     }
     stats
+}
+
+fn elapsed_ms_from_line(line: &str) -> Option<f64> {
+    let (_, elapsed) = line.rsplit_once("elapsed_ms=")?;
+    elapsed.split_whitespace().next()?.parse::<f64>().ok()
 }
