@@ -785,6 +785,17 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
             format!("convert sandbox users group SID to PSID failed: {err}"),
         ))
     })?;
+    struct SandboxGroupPsidGuard(*mut c_void);
+    impl Drop for SandboxGroupPsidGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if !self.0.is_null() {
+                    LocalFree(self.0 as HLOCAL);
+                }
+            }
+        }
+    }
+    let _sandbox_group_psid_guard = SandboxGroupPsidGuard(sandbox_group_psid);
     let sandbox_group_sid_str =
         string_from_sid_bytes(&sandbox_group_sid).map_err(anyhow::Error::msg)?;
 
@@ -1023,11 +1034,6 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
         lock_persistent_sandbox_dirs(payload, &sandbox_group_sid)?;
     }
 
-    unsafe {
-        if !sandbox_group_psid.is_null() {
-            LocalFree(sandbox_group_psid as HLOCAL);
-        }
-    }
     if refresh_only && !refresh_errors.is_empty() {
         log_line(
             log,
