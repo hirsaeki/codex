@@ -23,7 +23,12 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
+use tracing::Instrument;
+
+static MEASUREMENT_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 #[ctor]
 static CODEX_DISPATCH: Option<TestBinaryDispatchGuard> = {
@@ -206,10 +211,15 @@ async fn run_patch(
     trace_capture: &Arc<Mutex<Vec<u8>>>,
 ) -> Result<usize> {
     println!("APPLY_PATCH_BASELINE_BEGIN {operation}");
+    let measurement_id = format!(
+        "{operation}-{}",
+        MEASUREMENT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
     let trace_offset = trace_capture.lock().expect("trace capture lock").len();
     let started_at = Instant::now();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
+    let span = tracing::info_span!("apply_patch_p2m", measurement_id = %measurement_id);
     let result = codex_exec_server::with_apply_patch_fs_helper_reuse(
         codex_apply_patch::apply_patch_with_options(
             patch,
@@ -221,6 +231,7 @@ async fn run_patch(
             Some(sandbox),
         ),
     )
+    .instrument(span)
     .await;
     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
     if let Err(error) = result {
@@ -233,7 +244,7 @@ async fn run_patch(
 
     let trace = trace_capture.lock().expect("trace capture lock");
     let trace_slice = &trace[trace_offset.min(trace.len())..];
-    let first_fs_request_ms = first_fs_request_elapsed_ms(trace_slice)
+    let first_fs_request_ms = first_fs_request_elapsed_ms(trace_slice, &measurement_id)
         .with_context(|| format!("find first filesystem request timing for {operation}"))?;
     drop(trace);
 
@@ -286,13 +297,14 @@ async fn run_patch(
     Ok(lines.len())
 }
 
-fn first_fs_request_elapsed_ms(trace: &[u8]) -> Result<f64> {
+fn first_fs_request_elapsed_ms(trace: &[u8], measurement_id: &str) -> Result<f64> {
     let trace = String::from_utf8_lossy(trace);
     trace
         .lines()
+        .filter(|line| line.contains(measurement_id))
         .find(|line| line.contains("filesystem sandbox helper invocation completed"))
         .and_then(elapsed_ms_from_line)
-        .context("first filesystem helper completion was not present in tracing output")
+        .context("correlated first filesystem helper completion was not present in tracing output")
 }
 
 fn summarize_sandbox_log(lines: &[&str]) -> SandboxLogStats {
