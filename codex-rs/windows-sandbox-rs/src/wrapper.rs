@@ -59,14 +59,12 @@ pub(crate) fn record_elevated_phase_timings(preparation_ms: f64, runner_launch_m
 }
 
 fn take_elevated_phase_timings() -> Option<ElevatedPhaseTimings> {
-    ELEVATED_PHASE_TIMINGS
-        .get()
-        .and_then(|timings| {
-            timings
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-        })
+    ELEVATED_PHASE_TIMINGS.get().and_then(|timings| {
+        timings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
