@@ -1,0 +1,293 @@
+name: Apply P2 implementation v2
+
+on:
+  push:
+    branches:
+      - automation/p2-apply
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: perf/apply-patch-refresh-in-process-p2
+          fetch-depth: 0
+      - name: Apply P2 refactor
+        shell: python
+        run: |
+          from pathlib import Path
+
+          root = Path.cwd()
+          ws = root / "codex-rs/windows-sandbox-rs/src"
+
+          def replace_once(text, old, new, label):
+              if old not in text:
+                  raise SystemExit(f"missing anchor: {label}")
+              return text.replace(old, new, 1)
+
+          # Promote the existing setup implementation into the library without duplicating it.
+          (ws / "bin/setup_main/win.rs").rename(ws / "setup_impl.rs")
+          (ws / "bin/setup_main/win").rename(ws / "setup_impl")
+          (ws / "bin/setup_main/win_acl_tests.rs").rename(ws / "setup_impl_acl_tests.rs")
+
+          p = ws / "setup_impl.rs"
+          s = p.read_text(encoding="utf-8")
+          s = s.replace('#[path = "win_acl_tests.rs"]', '#[path = "setup_impl_acl_tests.rs"]')
+          old_payload = '''#[derive(Debug, Clone, Deserialize, Serialize)]
+          struct Payload {
+              version: u32,
+              offline_username: String,
+              online_username: String,
+              codex_home: PathBuf,
+              command_cwd: PathBuf,
+              read_roots: Vec<PathBuf>,
+              write_roots: Vec<PathBuf>,
+              #[serde(default)]
+              deny_read_paths: Vec<PathBuf>,
+              #[serde(default)]
+              deny_write_paths: Vec<PathBuf>,
+              proxy_ports: Vec<u16>,
+              #[serde(default)]
+              allow_local_binding: bool,
+              #[serde(default)]
+              otel: Option<StatsigMetricsSettings>,
+              real_user: String,
+              #[serde(default)]
+              mode: SetupMode,
+              #[serde(default)]
+              refresh_only: bool,
+          }
+
+          #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+          #[serde(rename_all = "kebab-case")]
+          enum SetupMode {
+          '''
+          new_payload = '''#[derive(Debug, Clone, Deserialize, Serialize)]
+          pub(crate) struct Payload {
+              pub(crate) version: u32,
+              pub(crate) offline_username: String,
+              pub(crate) online_username: String,
+              pub(crate) codex_home: PathBuf,
+              pub(crate) command_cwd: PathBuf,
+              pub(crate) read_roots: Vec<PathBuf>,
+              pub(crate) write_roots: Vec<PathBuf>,
+              #[serde(default)]
+              pub(crate) deny_read_paths: Vec<PathBuf>,
+              #[serde(default)]
+              pub(crate) deny_write_paths: Vec<PathBuf>,
+              pub(crate) proxy_ports: Vec<u16>,
+              #[serde(default)]
+              pub(crate) allow_local_binding: bool,
+              #[serde(default)]
+              pub(crate) otel: Option<StatsigMetricsSettings>,
+              pub(crate) real_user: String,
+              #[serde(default)]
+              pub(crate) mode: SetupMode,
+              #[serde(default)]
+              pub(crate) refresh_only: bool,
+          }
+
+          #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+          #[serde(rename_all = "kebab-case")]
+          pub(crate) enum SetupMode {
+          '''
+          s = replace_once(s, old_payload, new_payload, "shared payload visibility")
+          s = replace_once(
+              s,
+              'let exe = std::env::current_exe().context("locate setup helper")?;',
+              'let exe = crate::setup::find_setup_exe();',
+              "read ACL helper executable",
+          )
+          real_main = s.index("fn real_main() -> Result<()> {")
+          body_start = s.index("    if payload.version != SETUP_VERSION {", real_main)
+          run_setup_start = s.index("\nfn run_setup(", body_start)
+          body = s[body_start:run_setup_start]
+          if not body.rstrip().endswith("result\n}"):
+              raise SystemExit("unexpected real_main tail")
+          body_no_close = body.rstrip()[:-1].rstrip() + "\n"
+          body_no_close = body_no_close.replace(
+              "let result = run_setup(&payload, &mut log, &sbx_dir);",
+              "let result = run_setup(payload, &mut log, &sbx_dir);",
+              1,
+          )
+          shared = (
+              "    run_payload(&payload)\n}\n\n"
+              "pub(crate) fn run_payload(payload: &Payload) -> Result<()> {\n"
+              + body_no_close
+              + "}\n"
+          )
+          s = s[:body_start] + shared + s[run_setup_start:]
+          p.write_text(s, encoding="utf-8")
+
+          p = ws / "lib.rs"
+          s = p.read_text(encoding="utf-8")
+          s = replace_once(
+              s,
+              '#![allow(unsafe_op_in_unsafe_fn)]\n',
+              '#![allow(unsafe_op_in_unsafe_fn)]\n\nextern crate self as codex_windows_sandbox;\n',
+              "crate self alias",
+          )
+          s = replace_once(
+              s,
+              '#[cfg(target_os = "windows")]\nmod setup;\n',
+              '#[cfg(target_os = "windows")]\nmod setup;\n\n#[cfg(target_os = "windows")]\nmod setup_impl;\n',
+              "setup impl module",
+          )
+          export_anchor = '#[cfg(target_os = "windows")]\npub use setup::SETUP_VERSION;\n'
+          s = replace_once(
+              s,
+              export_anchor,
+              export_anchor + '''#[cfg(target_os = "windows")]
+          #[doc(hidden)]
+          pub fn run_setup_helper_main() -> anyhow::Result<()> {
+              setup_impl::main()
+          }
+          ''',
+              "setup helper entrypoint export",
+          )
+          p.write_text(s, encoding="utf-8")
+
+          (ws / "bin/setup_main/main.rs").write_text('''#[cfg(target_os = "windows")]
+          fn main() -> anyhow::Result<()> {
+              codex_windows_sandbox::run_setup_helper_main()
+          }
+
+          #[cfg(not(target_os = "windows"))]
+          fn main() {
+              panic!("codex-windows-sandbox-setup is Windows-only");
+          }
+          ''', encoding="utf-8")
+
+          p = ws / "setup.rs"
+          s = p.read_text(encoding="utf-8")
+          s = replace_once(
+              s,
+              'use crate::setup_error::read_setup_error_report;\n',
+              'use crate::setup_error::read_setup_error_report;\nuse crate::setup_impl::Payload as ElevationPayload;\nuse crate::setup_impl::SetupMode;\n',
+              "shared payload imports",
+          )
+          type_start = s.index("#[derive(Serialize)]\nstruct ElevationPayload")
+          type_end = s.index("#[derive(Debug, Clone, PartialEq, Eq)]\npub(crate) struct OfflineProxySettings", type_start)
+          s = s[:type_start] + s[type_end:]
+
+          refresh_fn = s.index("fn run_setup_refresh_inner(")
+          tail_start = s.index("    let json = serde_json::to_vec(&payload)?;", refresh_fn)
+          marker_start = s.index("#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]\npub struct SetupMarker", tail_start)
+          new_refresh_tail = '''    let json = serde_json::to_vec(&payload)?;
+              let singleflight_key = BASE64_STANDARD.encode(json);
+              run_setup_singleflight(singleflight_key, || {
+                  run_setup_refresh_payload(&payload, request.codex_home)
+              })
+          }
+
+          fn run_setup_refresh_payload(payload: &ElevationPayload, codex_home: &Path) -> Result<()> {
+              let sbx_dir = sandbox_dir(codex_home);
+              let cleared_report = match clear_setup_error_report(codex_home) {
+                  Ok(()) => true,
+                  Err(err) => {
+                      log_note(
+                          &format!("setup refresh: failed to clear setup_error.json before execution: {err}"),
+                          Some(&sbx_dir),
+                      );
+                      false
+                  }
+              };
+              log_note("setup refresh: running in-process", Some(&sbx_dir));
+              let started_at = std::time::Instant::now();
+              let result = crate::setup_impl::run_payload(payload);
+              log_note(
+                  &format!(
+                      "setup refresh in-process execution: completed success={} elapsed_ms={:.3}",
+                      result.is_ok(),
+                      started_at.elapsed().as_secs_f64() * 1000.0
+                  ),
+                  Some(&sbx_dir),
+              );
+              if result.is_err() {
+                  return Err(report_helper_failure(codex_home, cleared_report, Some(1)));
+              }
+              if let Err(err) = clear_setup_error_report(codex_home) {
+                  log_note(
+                      &format!("setup refresh: failed to clear setup_error.json after success: {err}"),
+                      Some(&sbx_dir),
+                  );
+              }
+              Ok(())
+          }
+
+          '''
+          s = s[:tail_start] + new_refresh_tail + s[marker_start:]
+          s = replace_once(
+              s,
+              "fn find_setup_exe() -> PathBuf {",
+              "pub(crate) fn find_setup_exe() -> PathBuf {",
+              "setup exe resolver visibility",
+          )
+          p.write_text(s, encoding="utf-8")
+
+          p = root / "codex-rs/core/tests/windows_apply_patch_baseline.rs"
+          s = p.read_text(encoding="utf-8")
+          s = replace_once(
+              s,
+              '    setup_refresh_child_execution_ms: Option<f64>,\n',
+              '    setup_refresh_execution_ms: Option<f64>,\n    setup_refresh_child_spawns: usize,\n',
+              "stats refresh fields",
+          )
+          s = replace_once(
+              s,
+              '    setup_refresh_child_execution_ms: f64,\n    setup_refresh_orchestration_estimated_ms: f64,\n',
+              '    setup_refresh_execution_ms: f64,\n    setup_refresh_overhead_ms: f64,\n    setup_refresh_child_spawns: usize,\n',
+              "result refresh fields",
+          )
+          old_timing = '''    let setup_refresh_child_execution_ms = stats
+                  .setup_refresh_child_execution_ms
+                  .with_context(|| format!("missing setup refresh child execution timing for {operation}"))?;
+          '''
+          new_timing = '''    anyhow::ensure!(
+                  stats.setup_refresh_child_spawns == 0,
+                  "{operation} expected refresh-only setup to execute in-process, got {} child spawns",
+                  stats.setup_refresh_child_spawns
+              );
+              let setup_refresh_execution_ms = stats
+                  .setup_refresh_execution_ms
+                  .with_context(|| format!("missing setup refresh in-process execution timing for {operation}"))?;
+          '''
+          s = replace_once(s, old_timing, new_timing, "harness refresh timing")
+          s = replace_once(
+              s,
+              '        setup_refresh_child_execution_ms,\n        setup_refresh_orchestration_estimated_ms: stats.setup_refresh_total_ms\n            - setup_refresh_child_execution_ms,\n',
+              '        setup_refresh_execution_ms,\n        setup_refresh_overhead_ms: stats.setup_refresh_total_ms - setup_refresh_execution_ms,\n        setup_refresh_child_spawns: stats.setup_refresh_child_spawns,\n',
+              "harness result construction",
+          )
+          s = replace_once(
+              s,
+              '''        } else if line.contains("setup refresh child execution: completed success=") {
+                  stats.setup_refresh_child_execution_ms = elapsed_ms_from_line(line);
+              } else if line.contains("elevated sandbox preparation: completed success=") {
+          ''',
+              '''        } else if line.contains("setup refresh in-process execution: completed success=") {
+                  stats.setup_refresh_execution_ms = elapsed_ms_from_line(line);
+              } else if line.contains("setup refresh: spawning ") {
+                  stats.setup_refresh_child_spawns += 1;
+              } else if line.contains("elevated sandbox preparation: completed success=") {
+          ''',
+              "harness log parser",
+          )
+          p.write_text(s, encoding="utf-8")
+      - name: Format
+        run: cargo fmt --all
+        working-directory: codex-rs
+      - name: Commit P2 changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m "Run Windows setup refresh in process"
+          git push origin HEAD:perf/apply-patch-refresh-in-process-p2
