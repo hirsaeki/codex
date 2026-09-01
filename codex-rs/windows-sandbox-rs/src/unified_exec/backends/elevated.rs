@@ -24,6 +24,7 @@ use codex_utils_pty::SpawnedProcess;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Instant;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -179,6 +180,8 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
             permission_profile,
             workspace_roots,
         )?;
+
+    let preparation_started_at = Instant::now();
     let elevated = prepare_elevated_spawn_context_for_permissions(
         permissions.clone(),
         codex_home,
@@ -193,6 +196,7 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
         proxy_enforced,
         proxy_settings_mode,
     )?;
+    let preparation_ms = preparation_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let sandbox_creds = elevated.sandbox_creds;
     let request = RunnerTransportRequest {
@@ -225,7 +229,11 @@ pub(crate) async fn spawn_windows_sandbox_session_elevated_for_permission_profil
         proxy_enforced,
         proxy_settings_mode,
     };
+
+    let runner_started_at = Instant::now();
     let transport = spawn_runner_transport_task(sandbox_creds, request).await?;
+    let runner_launch_ms = runner_started_at.elapsed().as_secs_f64() * 1000.0;
+    crate::wrapper::record_elevated_phase_timings(preparation_ms, runner_launch_ms);
     let (pipe_write, pipe_read) = transport.into_files();
 
     let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>(128);
