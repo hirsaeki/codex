@@ -20,14 +20,38 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Select branch
+        id: select
+        shell: bash
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title || '' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          ref="$DEFAULT_BRANCH"
+          if [[ "$GITHUB_EVENT_NAME" == "issues" ]]; then
+            requested="${ISSUE_TITLE#\[repository-bundle\]}"
+            requested="$(printf '%s' "$requested" | xargs)"
+            if [[ -n "$requested" ]]; then
+              ref="$requested"
+            fi
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ steps.select.outputs.ref }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Create git bundle
-        run: git bundle create "$RUNNER_TEMP/repo.bundle" --all
+        id: bundle
+        shell: bash
+        env:
+          REF: ${{ steps.select.outputs.ref }}
+        run: |
+          commit="$(git rev-parse HEAD)"
+          git bundle create "$RUNNER_TEMP/repo.bundle" "refs/heads/$REF"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
 
       - name: Verify git bundle
         run: git bundle verify "$RUNNER_TEMP/repo.bundle"
@@ -35,7 +59,7 @@ jobs:
       - name: Upload git bundle
         uses: actions/upload-artifact@v7
         with:
-          name: codex-git-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/repo.bundle
           if-no-files-found: error
           retention-days: 7
