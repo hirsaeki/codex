@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   bundle:
@@ -60,10 +61,16 @@ jobs:
         shell: bash
         run: |
           mkdir -p bundle-parts
-          split -n 8 -d -a 2 "$RUNNER_TEMP/repo.bundle" bundle-parts/repo.bundle.part-
+          split -b 32M -d -a 2 "$RUNNER_TEMP/repo.bundle" bundle-parts/repo.bundle.part-
+          count="$(find bundle-parts -maxdepth 1 -type f -name 'repo.bundle.part-*' | wc -l)"
+          if (( count > 16 )); then
+            echo "::error::Repository bundle requires $count chunks; this workflow supports up to 16 x 32 MiB chunks."
+            exit 1
+          fi
           ls -lh bundle-parts
 
       - name: Upload git bundle part 00
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-00') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-00
@@ -73,6 +80,7 @@ jobs:
           compression-level: 0
 
       - name: Upload git bundle part 01
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-01') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-01
@@ -82,6 +90,7 @@ jobs:
           compression-level: 0
 
       - name: Upload git bundle part 02
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-02') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-02
@@ -91,6 +100,7 @@ jobs:
           compression-level: 0
 
       - name: Upload git bundle part 03
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-03') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-03
@@ -100,6 +110,7 @@ jobs:
           compression-level: 0
 
       - name: Upload git bundle part 04
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-04') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-04
@@ -109,6 +120,7 @@ jobs:
           compression-level: 0
 
       - name: Upload git bundle part 05
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-05') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-05
@@ -118,6 +130,7 @@ jobs:
           compression-level: 0
 
       - name: Upload git bundle part 06
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-06') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-06
@@ -127,6 +140,7 @@ jobs:
           compression-level: 0
 
       - name: Upload git bundle part 07
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-07') != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-07
@@ -134,3 +148,96 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
+      - name: Upload git bundle part 08
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-08') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-08
+          path: bundle-parts/repo.bundle.part-08
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload git bundle part 09
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-09') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-09
+          path: bundle-parts/repo.bundle.part-09
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload git bundle part 10
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-10') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-10
+          path: bundle-parts/repo.bundle.part-10
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload git bundle part 11
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-11') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-11
+          path: bundle-parts/repo.bundle.part-11
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload git bundle part 12
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-12') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-12
+          path: bundle-parts/repo.bundle.part-12
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload git bundle part 13
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-13') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-13
+          path: bundle-parts/repo.bundle.part-13
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload git bundle part 14
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-14') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-14
+          path: bundle-parts/repo.bundle.part-14
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload git bundle part 15
+        if: ${{ hashFiles('bundle-parts/repo.bundle.part-15') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-15
+          path: bundle-parts/repo.bundle.part-15
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Close trigger issue
+        if: ${{ github.event_name == 'issues' }}
+        uses: actions/github-script@v8
+        with:
+          script: |
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              state: 'closed',
+              state_reason: 'completed',
+            });
