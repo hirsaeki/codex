@@ -83,7 +83,7 @@ async fn run_test() -> Result<()> {
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    codex_exec_server::with_apply_patch_fs_helper_reuse(
+    let (result, helper_cleanup) = codex_exec_server::with_apply_patch_fs_helper_reuse(
         codex_apply_patch::apply_patch_with_options(
             "*** Begin Patch\n*** Add File: reuse.txt\n+one\n*** End Patch\n",
             ApplyPatchOptions::default(),
@@ -94,8 +94,9 @@ async fn run_test() -> Result<()> {
             Some(&sandbox),
         ),
     )
-    .await
-    .map_err(|error| anyhow::anyhow!("apply_patch failed: {error}"))?;
+    .await;
+    result.map_err(|error| anyhow::anyhow!("apply_patch failed: {error}"))?;
+    helper_cleanup.context("cleanup apply_patch filesystem helper")?;
 
     anyhow::ensure!(
         std::fs::read_to_string(&target_path)? == "one\n",

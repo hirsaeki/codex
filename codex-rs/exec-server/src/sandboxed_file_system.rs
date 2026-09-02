@@ -68,8 +68,10 @@ tokio::task_local! {
 ///
 /// This is deliberately lexical rather than a process-wide pool: the helper is
 /// created lazily on the first sandboxed request and is closed before this future
-/// returns. Non-Windows callers preserve the existing one-request helper behavior.
-pub async fn with_apply_patch_fs_helper_reuse<F>(future: F) -> F::Output
+/// returns. The second tuple element reports helper cleanup so the caller can
+/// preserve the patch result while still surfacing a successful-patch cleanup
+/// failure. Non-Windows callers preserve the existing helper behavior.
+pub async fn with_apply_patch_fs_helper_reuse<F>(future: F) -> (F::Output, FileSystemResult<()>)
 where
     F: Future,
 {
@@ -77,18 +79,16 @@ where
     {
         let slot = Arc::new(Mutex::new(None));
         let output = APPLY_PATCH_FS_HELPER.scope(Arc::clone(&slot), future).await;
-        let helper = slot.lock().await.take();
-        if let Some(helper) = helper
-            && let Err(error) = helper.finish().await
-        {
-            tracing::warn!(%error, "failed to clean up apply_patch filesystem helper");
-        }
-        output
+        let helper_cleanup = match slot.lock().await.take() {
+            Some(helper) => helper.finish().await,
+            None => Ok(()),
+        };
+        (output, helper_cleanup)
     }
 
     #[cfg(not(windows))]
     {
-        future.await
+        (future.await, Ok(()))
     }
 }
 

@@ -176,7 +176,7 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
         let sandbox = Self::file_system_sandbox_context_for_attempt(req, attempt);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let result = codex_exec_server::with_apply_patch_fs_helper_reuse(
+        let (result, helper_cleanup) = codex_exec_server::with_apply_patch_fs_helper_reuse(
             codex_apply_patch::apply_patch_with_options(
                 &req.action.patch,
                 ApplyPatchOptions {
@@ -198,9 +198,23 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
             ),
         )
         .await;
+        let patch_failed = result.is_err();
+        let helper_cleanup_error = helper_cleanup.err();
+        if patch_failed {
+            if let Some(error) = helper_cleanup_error.as_ref() {
+                tracing::warn!(
+                    %error,
+                    "failed to clean up apply_patch filesystem helper after patch failure"
+                );
+            }
+        } else if let Some(error) = helper_cleanup_error.as_ref() {
+            stderr.extend_from_slice(
+                format!("filesystem sandbox helper cleanup failed: {error}\n").as_bytes(),
+            );
+        }
+        let failed = patch_failed || helper_cleanup_error.is_some();
         let stdout = String::from_utf8_lossy(&stdout).into_owned();
         let stderr = String::from_utf8_lossy(&stderr).into_owned();
-        let failed = result.is_err();
         let exit_code = if failed { 1 } else { 0 };
         let delta = match result {
             Ok(delta) => delta,
