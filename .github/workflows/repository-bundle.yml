@@ -56,11 +56,81 @@ jobs:
       - name: Verify git bundle
         run: git bundle verify "$RUNNER_TEMP/repo.bundle"
 
-      - name: Upload git bundle
+      - name: Split git bundle
+        shell: bash
+        run: |
+          mkdir -p bundle-parts
+          split -n 8 -d -a 2 "$RUNNER_TEMP/repo.bundle" bundle-parts/repo.bundle.part-
+          ls -lh bundle-parts
+
+      - name: Upload git bundle part 00
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/repo.bundle
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-00
+          path: bundle-parts/repo.bundle.part-00
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload git bundle part 01
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-01
+          path: bundle-parts/repo.bundle.part-01
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload git bundle part 02
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-02
+          path: bundle-parts/repo.bundle.part-02
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload git bundle part 03
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-03
+          path: bundle-parts/repo.bundle.part-03
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload git bundle part 04
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-04
+          path: bundle-parts/repo.bundle.part-04
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload git bundle part 05
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-05
+          path: bundle-parts/repo.bundle.part-05
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload git bundle part 06
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-06
+          path: bundle-parts/repo.bundle.part-06
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload git bundle part 07
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-git-bundle-${{ steps.bundle.outputs.commit }}-${{ github.run_id }}-${{ github.run_attempt }}-part-07
+          path: bundle-parts/repo.bundle.part-07
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
