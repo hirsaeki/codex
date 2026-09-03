@@ -9,6 +9,7 @@ on:
       - .github/workflows/windows-p2-postmerge-benchmark.yml
   workflow_dispatch:
 
+# Measurement-only workflow; do not merge into main.
 permissions:
   contents: read
 
