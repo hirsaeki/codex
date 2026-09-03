@@ -1,0 +1,45 @@
+name: temp-p2-cleanup-fix
+
+on:
+  push:
+    branches: [perf/apply-patch-refresh-in-process-p2-main-20260904-v2]
+    paths: [.github/workflows/temp-p2-cleanup-fix.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Restore read-ACL PSID cleanup
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path("codex-rs/windows-sandbox-rs/src/setup_impl.rs")
+          s = p.read_text()
+          start = s.index("fn run_read_acl_only(")
+          end = s.index("\nfn ", start + 1)
+          block = s[start:end]
+          if "LocalFree(sandbox_group_psid as HLOCAL);" in block:
+              raise SystemExit("read-ACL cleanup already present")
+          needle = "    if !refresh_errors.is_empty() {\n"
+          pos = s.index(needle, start, end)
+          cleanup = "    unsafe {\n        if !sandbox_group_psid.is_null() {\n            LocalFree(sandbox_group_psid as HLOCAL);\n        }\n    }\n"
+          s = s[:pos] + cleanup + s[pos:]
+          p.write_text(s)
+      - name: Format and publish corrected tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd codex-rs && cargo fmt --all && cd ..
+          rm .github/workflows/temp-p2-cleanup-fix.yml
+          git add -A
+          git diff --cached --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m "Restore read ACL PSID cleanup"
+          git push origin HEAD
