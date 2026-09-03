@@ -1,10 +1,10 @@
 name: postmerge-ci
 
 # This is the single entrypoint for main-only CI that is intentionally outside
-# the merge-blocking suite. It keeps the broader postmerge signal in one run.
+# the merge-blocking suite. In this fork it is manual-only so upstream syncs and
+# normal merges do not spend CI on duplicate post-merge verification.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   # Keep reusable workflow calls alphabetized. Each child retains its own
@@ -27,8 +27,8 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     steps:
-      # Postmerge runs use the pushed main commit, so this helper always comes
-      # from the same revision that defined the parent workflow.
+      # Manual postmerge runs use the selected ref, so this helper comes from
+      # the same revision that defined the parent workflow.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.sha }}
