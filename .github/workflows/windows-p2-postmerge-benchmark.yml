@@ -1,0 +1,91 @@
+name: Windows P2 post-merge benchmark
+
+on:
+  push:
+    branches:
+      - measure/p2-postmerge-bench-20260904
+    paths:
+      - codex-rs/core/tests/windows_apply_patch_p2_benchmark.rs
+      - .github/workflows/windows-p2-postmerge-benchmark.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build benchmark artifact
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - name: Build benchmark and Windows helpers once
+        shell: pwsh
+        run: |
+          Set-Location codex-rs
+          cargo build -p codex-windows-sandbox --bins
+          cargo test -p codex-core --test windows_apply_patch_p2_benchmark --no-run
+
+          $stage = Join-Path $env:RUNNER_TEMP 'p2-bench-artifact'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $testExe = Get-ChildItem (Join-Path $env:CARGO_TARGET_DIR 'debug/deps') -Filter 'windows_apply_patch_p2_benchmark-*.exe' |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $testExe) { throw 'benchmark test executable not found' }
+
+          Copy-Item $testExe.FullName (Join-Path $stage 'windows_apply_patch_p2_benchmark.exe')
+          Copy-Item (Join-Path $env:CARGO_TARGET_DIR 'debug/codex-windows-sandbox-setup.exe') $stage
+          Copy-Item (Join-Path $env:CARGO_TARGET_DIR 'debug/codex-command-runner.exe') $stage
+          @{
+            source_sha = '${{ github.sha }}'
+            source_tree = 'b617a547b33c797724fbe1b6788059c3f17c7b75'
+            rust_toolchain = '1.95.0'
+            runner_os = '${{ runner.os }}'
+          } | ConvertTo-Json | Set-Content (Join-Path $stage 'provenance.json')
+      - name: Upload benchmark artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-p2-bench-${{ github.sha }}
+          path: ${{ runner.temp }}/p2-bench-artifact
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  verify:
+    name: Verify / benchmark run ${{ matrix.run }}
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        run: [1, 2, 3]
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: windows-p2-bench-${{ github.sha }}
+          path: ${{ runner.temp }}/p2-bench
+      - name: Run benchmark directly from artifact
+        shell: pwsh
+        run: |
+          $bench = Join-Path $env:RUNNER_TEMP 'p2-bench'
+          $env:CODEX_HOME = Join-Path $env:RUNNER_TEMP 'codex-p2-bench-home'
+          New-Item -ItemType Directory -Force -Path $env:CODEX_HOME | Out-Null
+          $result = Join-Path $env:RUNNER_TEMP 'p2-bench-result-${{ matrix.run }}.log'
+          & (Join-Path $bench 'windows_apply_patch_p2_benchmark.exe') --nocapture --test-threads=1 2>&1 |
+            Tee-Object -FilePath $result
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload benchmark result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: p2-bench-result-${{ matrix.run }}
+          path: ${{ runner.temp }}/p2-bench-result-${{ matrix.run }}.log
+          if-no-files-found: error
+          retention-days: 7
