@@ -12,23 +12,176 @@ permissions:
 
 jobs:
   apply:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Apply validated P2 patch and remove bootstrap workflow
+      - name: Apply P2 from current tree
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          root = Path.cwd()
+          ws = root / "codex-rs/windows-sandbox-rs/src"
+
+          def once(s, old, new, label):
+              if old not in s:
+                  raise SystemExit(f"missing {label}")
+              return s.replace(old, new, 1)
+
+          # Share the current upstream setup implementation instead of copying an old P2 tree.
+          (ws / "bin/setup_main/win.rs").rename(ws / "setup_impl.rs")
+          (ws / "bin/setup_main/win").rename(ws / "setup_impl")
+          (ws / "bin/setup_main/win_acl_tests.rs").rename(ws / "setup_impl_acl_tests.rs")
+
+          p = ws / "setup_impl.rs"
+          s = p.read_text()
+          s = once(s, '#[path = "win_acl_tests.rs"]', '#[path = "setup_impl_acl_tests.rs"]', "acl test path")
+          start = s.index("struct Payload {")
+          end = s.index("\n}\n\n#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]", start)
+          block = s[start:end]
+          block = block.replace("struct Payload {", "pub(crate) struct Payload {", 1)
+          block = re.sub(r"(?m)^(    )(?!#)([a-z][a-z0-9_]*: )", r"\1pub(crate) \2", block)
+          s = s[:start] + block + s[end:]
+          s = once(s, "enum SetupMode {", "pub(crate) enum SetupMode {", "SetupMode")
+          s = once(s, 'let exe = std::env::current_exe().context("locate setup helper")?;', 'let exe = crate::setup::find_setup_exe();', "read-acl helper resolver")
+          marker = '    let sbx_dir = sandbox_dir(&payload.codex_home);\n'
+          pos = s.index(marker, s.index("fn real_main("))
+          s = s[:pos] + '    run_payload(&payload)\n}\n\npub(crate) fn run_payload(payload: &Payload) -> Result<()> {\n' + s[pos:]
+          guard_anchor = '''    let sandbox_group_sid_str =
+              string_from_sid_bytes(&sandbox_group_sid).map_err(anyhow::Error::msg)?;
+          '''
+          guard = '''    struct SandboxGroupPsidGuard(*mut c_void);
+          impl Drop for SandboxGroupPsidGuard {
+              fn drop(&mut self) {
+                  unsafe {
+                      if !self.0.is_null() {
+                          LocalFree(self.0 as HLOCAL);
+                      }
+                  }
+              }
+          }
+          let _sandbox_group_psid_guard = SandboxGroupPsidGuard(sandbox_group_psid);
+          '''
+          s = once(s, guard_anchor, guard + guard_anchor, "PSID guard")
+          manual_free = '''    unsafe {
+              if !sandbox_group_psid.is_null() {
+                  LocalFree(sandbox_group_psid as HLOCAL);
+              }
+          }
+          '''
+          s = once(s, manual_free, "", "manual PSID free")
+          p.write_text(s)
+
+          p = ws / "lib.rs"
+          s = p.read_text()
+          s = once(s, '#![allow(unsafe_op_in_unsafe_fn)]\n', '#![allow(unsafe_op_in_unsafe_fn)]\n\nextern crate self as codex_windows_sandbox;\n', "self alias")
+          s = once(s, '#[cfg(target_os = "windows")]\nmod setup;\n', '#[cfg(target_os = "windows")]\nmod setup;\n\n#[cfg(target_os = "windows")]\nmod setup_impl;\n', "setup_impl module")
+          anchor = '#[cfg(target_os = "windows")]\npub use setup::SETUP_VERSION;\n'
+          s = once(s, anchor, anchor + '#[cfg(target_os = "windows")]\n#[doc(hidden)]\npub fn run_setup_helper_main() -> anyhow::Result<()> {\n    setup_impl::main()\n}\n', "setup helper export")
+          p.write_text(s)
+
+          (ws / "bin/setup_main/main.rs").write_text('''#[cfg(target_os = "windows")]
+          fn main() -> anyhow::Result<()> {
+              codex_windows_sandbox::run_setup_helper_main()
+          }
+
+          #[cfg(not(target_os = "windows"))]
+          fn main() {
+              panic!("codex-windows-sandbox-setup is Windows-only");
+          }
+          ''')
+
+          p = ws / "setup.rs"
+          s = p.read_text()
+          s = once(s, 'use crate::logging::current_log_file_path;\n', '', "refresh log path import")
+          s = once(s, 'use crate::setup_error::read_setup_error_report;\n', 'use crate::setup_error::read_setup_error_report;\nuse crate::setup_impl::Payload as ElevationPayload;\nuse crate::setup_impl::SetupMode;\n', "payload imports")
+          a = s.index("#[derive(Serialize)]\nstruct ElevationPayload")
+          b = s.index("#[derive(Debug, Clone, PartialEq, Eq)]\npub(crate) struct OfflineProxySettings", a)
+          s = s[:a] + s[b:]
+          refresh = s.index("fn run_setup_refresh_inner(")
+          a = s.index("    let json = serde_json::to_vec(&payload)?;", refresh)
+          b = s.index("#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]\npub struct SetupMarker", a)
+          replacement = '''    let json = serde_json::to_vec(&payload)?;
+              let singleflight_key = BASE64_STANDARD.encode(json);
+              run_setup_singleflight(singleflight_key, || {
+                  run_setup_refresh_payload(&payload, request.codex_home)
+              })
+          }
+
+          fn run_setup_refresh_payload(payload: &ElevationPayload, codex_home: &Path) -> Result<()> {
+              let sbx_dir = sandbox_dir(codex_home);
+              let cleared_report = match clear_setup_error_report(codex_home) {
+                  Ok(()) => true,
+                  Err(err) => {
+                      log_note(
+                          &format!("setup refresh: failed to clear setup_error.json before execution: {err}"),
+                          Some(&sbx_dir),
+                      );
+                      false
+                  }
+              };
+              log_note("setup refresh: running in-process", Some(&sbx_dir));
+              let result = crate::setup_impl::run_payload(payload);
+              if result.is_err() {
+                  return Err(report_helper_failure(codex_home, cleared_report, Some(1)));
+              }
+              if let Err(err) = clear_setup_error_report(codex_home) {
+                  log_note(
+                      &format!("setup refresh: failed to clear setup_error.json after success: {err}"),
+                      Some(&sbx_dir),
+                  );
+              }
+              Ok(())
+          }
+
+          '''
+          s = s[:a] + replacement + s[b:]
+          s = once(s, "fn find_setup_exe() -> PathBuf {", "pub(crate) fn find_setup_exe() -> PathBuf {", "setup exe resolver")
+          p.write_text(s)
+
+          p = root / "codex-rs/core/tests/windows_apply_patch_fs_helper_reuse.rs"
+          s = p.read_text()
+          anchor = '''    anyhow::ensure!(
+              helper_starts == 1,
+              "expected exactly one filesystem helper for one apply_patch, got {helper_starts}"
+          );
+          '''
+          checks = '''    let operation_log = log.lines().skip(log_line_count).collect::<Vec<_>>();
+              let setup_refreshes = operation_log
+                  .iter()
+                  .filter(|line| line.contains("setup refresh: running in-process"))
+                  .count();
+              let refresh_child_spawns = operation_log
+                  .iter()
+                  .filter(|line| line.contains("setup refresh: spawning "))
+                  .count();
+              anyhow::ensure!(
+                  setup_refreshes == 1,
+                  "expected exactly one in-process sandbox setup refresh, got {setup_refreshes}"
+              );
+              anyhow::ensure!(
+                  refresh_child_spawns == 0,
+                  "expected no refresh-only setup child process, got {refresh_child_spawns}"
+              );
+          '''
+          s = once(s, anchor, anchor + checks, "P1R regression anchor")
+          p.write_text(s)
+      - name: Format, verify shape, and publish transport branch
         shell: bash
         run: |
-          cat > /tmp/p2.b64 <<'EOF'
-          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
-          EOF
-          tr -d '[:space:]' < /tmp/p2.b64 | base64 -d | gzip -d > /tmp/p2.patch
-          git apply --index /tmp/p2.patch
+          set -euo pipefail
+          cd codex-rs
+          cargo fmt --all
+          cd ..
           rm .github/workflows/temp-apply-p2.yml
           git add -A
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'Run Windows apply_patch setup refresh in process'
+          git diff --cached --check
+          test "$(git diff --cached --name-only | grep -c '^\.github/workflows/temp-apply-p2.yml$' || true)" -eq 1
+          test "$(git diff --cached -- codex-rs/windows-sandbox-rs/src/setup.rs | grep -c 'setup refresh: spawning' || true)" -ge 1
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m "Run Windows apply_patch setup refresh in process"
           git push origin HEAD
