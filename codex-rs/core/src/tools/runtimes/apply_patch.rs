@@ -229,7 +229,7 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
             duration: started_at.elapsed(),
             timed_out: false,
         };
-        let sandbox_denied = failed
+        let sandbox_denied = patch_failed
             && if attempt.sandbox == SandboxType::None {
                 attempt.sandbox_requested && is_likely_executor_managed_sandbox_denied(&output)
             } else {
