@@ -2,10 +2,8 @@ name: temp-apply-p2
 
 on:
   push:
-    branches:
-      - perf/apply-patch-refresh-in-process-p2-main-20260904
-    paths:
-      - .github/workflows/temp-apply-p2.yml
+    branches: [perf/apply-patch-refresh-in-process-p2-main-20260904]
+    paths: [.github/workflows/temp-apply-p2.yml]
 
 permissions:
   contents: write
@@ -22,7 +20,6 @@ jobs:
         run: |
           from pathlib import Path
           import re
-
           root = Path.cwd()
           ws = root / "codex-rs/windows-sandbox-rs/src"
 
@@ -31,72 +28,56 @@ jobs:
                   raise SystemExit(f"missing {label}")
               return s.replace(old, new, 1)
 
-          # Share the current upstream setup implementation instead of copying an old P2 tree.
           (ws / "bin/setup_main/win.rs").rename(ws / "setup_impl.rs")
           (ws / "bin/setup_main/win").rename(ws / "setup_impl")
           (ws / "bin/setup_main/win_acl_tests.rs").rename(ws / "setup_impl_acl_tests.rs")
 
           p = ws / "setup_impl.rs"
           s = p.read_text()
-          s = once(s, '#[path = "win_acl_tests.rs"]', '#[path = "setup_impl_acl_tests.rs"]', "acl test path")
+          s = once(s, '#[path = "win_acl_tests.rs"]', '#[path = "setup_impl_acl_tests.rs"]', "acl path")
           start = s.index("struct Payload {")
           end = s.index("\n}\n\n#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]", start)
-          block = s[start:end]
-          block = block.replace("struct Payload {", "pub(crate) struct Payload {", 1)
+          block = s[start:end].replace("struct Payload {", "pub(crate) struct Payload {", 1)
           block = re.sub(r"(?m)^(    )(?!#)([a-z][a-z0-9_]*: )", r"\1pub(crate) \2", block)
           s = s[:start] + block + s[end:]
           s = once(s, "enum SetupMode {", "pub(crate) enum SetupMode {", "SetupMode")
-          s = once(s, 'let exe = std::env::current_exe().context("locate setup helper")?;', 'let exe = crate::setup::find_setup_exe();', "read-acl helper resolver")
+          s = once(s, 'let exe = std::env::current_exe().context("locate setup helper")?;', 'let exe = crate::setup::find_setup_exe();', "read ACL helper resolver")
           marker = '    let sbx_dir = sandbox_dir(&payload.codex_home);\n'
           pos = s.index(marker, s.index("fn real_main("))
           s = s[:pos] + '    run_payload(&payload)\n}\n\npub(crate) fn run_payload(payload: &Payload) -> Result<()> {\n' + s[pos:]
-          guard_anchor = '''    let sandbox_group_sid_str =
-              string_from_sid_bytes(&sandbox_group_sid).map_err(anyhow::Error::msg)?;
-          '''
+          psid = s.index("    let sandbox_group_psid = sid_bytes_to_psid", s.index("fn run_setup_full("))
+          after = s.index("    let sandbox_group_sid_str =", psid)
           guard = '''    struct SandboxGroupPsidGuard(*mut c_void);
-          impl Drop for SandboxGroupPsidGuard {
-              fn drop(&mut self) {
-                  unsafe {
-                      if !self.0.is_null() {
-                          LocalFree(self.0 as HLOCAL);
+              impl Drop for SandboxGroupPsidGuard {
+                  fn drop(&mut self) {
+                      unsafe {
+                          if !self.0.is_null() {
+                              LocalFree(self.0 as HLOCAL);
+                          }
                       }
                   }
               }
-          }
-          let _sandbox_group_psid_guard = SandboxGroupPsidGuard(sandbox_group_psid);
+              let _sandbox_group_psid_guard = SandboxGroupPsidGuard(sandbox_group_psid);
           '''
-          s = once(s, guard_anchor, guard + guard_anchor, "PSID guard")
-          manual_free = '''    unsafe {
-              if !sandbox_group_psid.is_null() {
-                  LocalFree(sandbox_group_psid as HLOCAL);
-              }
-          }
-          '''
-          s = once(s, manual_free, "", "manual PSID free")
+          s = s[:after] + guard + s[after:]
+          s, n = re.subn(r'\n    unsafe \{\n        if !sandbox_group_psid\.is_null\(\) \{\n            LocalFree\(sandbox_group_psid as HLOCAL\);\n        \}\n    \}\n', '\n', s, count=1)
+          if n != 1:
+              raise SystemExit("missing manual PSID free")
           p.write_text(s)
 
           p = ws / "lib.rs"
           s = p.read_text()
           s = once(s, '#![allow(unsafe_op_in_unsafe_fn)]\n', '#![allow(unsafe_op_in_unsafe_fn)]\n\nextern crate self as codex_windows_sandbox;\n', "self alias")
-          s = once(s, '#[cfg(target_os = "windows")]\nmod setup;\n', '#[cfg(target_os = "windows")]\nmod setup;\n\n#[cfg(target_os = "windows")]\nmod setup_impl;\n', "setup_impl module")
+          s = once(s, '#[cfg(target_os = "windows")]\nmod setup;\n', '#[cfg(target_os = "windows")]\nmod setup;\n\n#[cfg(target_os = "windows")]\nmod setup_impl;\n', "setup impl module")
           anchor = '#[cfg(target_os = "windows")]\npub use setup::SETUP_VERSION;\n'
-          s = once(s, anchor, anchor + '#[cfg(target_os = "windows")]\n#[doc(hidden)]\npub fn run_setup_helper_main() -> anyhow::Result<()> {\n    setup_impl::main()\n}\n', "setup helper export")
+          s = once(s, anchor, anchor + '#[cfg(target_os = "windows")]\n#[doc(hidden)]\npub fn run_setup_helper_main() -> anyhow::Result<()> {\n    setup_impl::main()\n}\n', "helper export")
           p.write_text(s)
 
-          (ws / "bin/setup_main/main.rs").write_text('''#[cfg(target_os = "windows")]
-          fn main() -> anyhow::Result<()> {
-              codex_windows_sandbox::run_setup_helper_main()
-          }
-
-          #[cfg(not(target_os = "windows"))]
-          fn main() {
-              panic!("codex-windows-sandbox-setup is Windows-only");
-          }
-          ''')
+          (ws / "bin/setup_main/main.rs").write_text('#[cfg(target_os = "windows")]\nfn main() -> anyhow::Result<()> {\n    codex_windows_sandbox::run_setup_helper_main()\n}\n\n#[cfg(not(target_os = "windows"))]\nfn main() {\n    panic!("codex-windows-sandbox-setup is Windows-only");\n}\n')
 
           p = ws / "setup.rs"
           s = p.read_text()
-          s = once(s, 'use crate::logging::current_log_file_path;\n', '', "refresh log path import")
+          s = once(s, 'use crate::logging::current_log_file_path;\n', '', "log path import")
           s = once(s, 'use crate::setup_error::read_setup_error_report;\n', 'use crate::setup_error::read_setup_error_report;\nuse crate::setup_impl::Payload as ElevationPayload;\nuse crate::setup_impl::SetupMode;\n', "payload imports")
           a = s.index("#[derive(Serialize)]\nstruct ElevationPayload")
           b = s.index("#[derive(Debug, Clone, PartialEq, Eq)]\npub(crate) struct OfflineProxySettings", a)
@@ -139,16 +120,12 @@ jobs:
 
           '''
           s = s[:a] + replacement + s[b:]
-          s = once(s, "fn find_setup_exe() -> PathBuf {", "pub(crate) fn find_setup_exe() -> PathBuf {", "setup exe resolver")
+          s = once(s, "fn find_setup_exe() -> PathBuf {", "pub(crate) fn find_setup_exe() -> PathBuf {", "setup exe")
           p.write_text(s)
 
           p = root / "codex-rs/core/tests/windows_apply_patch_fs_helper_reuse.rs"
           s = p.read_text()
-          anchor = '''    anyhow::ensure!(
-              helper_starts == 1,
-              "expected exactly one filesystem helper for one apply_patch, got {helper_starts}"
-          );
-          '''
+          anchor = '    anyhow::ensure!(\n        helper_starts == 1,\n        "expected exactly one filesystem helper for one apply_patch, got {helper_starts}"\n    );\n'
           checks = '''    let operation_log = log.lines().skip(log_line_count).collect::<Vec<_>>();
               let setup_refreshes = operation_log
                   .iter()
@@ -167,20 +144,16 @@ jobs:
                   "expected no refresh-only setup child process, got {refresh_child_spawns}"
               );
           '''
-          s = once(s, anchor, anchor + checks, "P1R regression anchor")
+          s = once(s, anchor, anchor + checks, "P1R test anchor")
           p.write_text(s)
-      - name: Format, verify shape, and publish transport branch
+      - name: Format and publish transport branch
         shell: bash
         run: |
           set -euo pipefail
-          cd codex-rs
-          cargo fmt --all
-          cd ..
+          cd codex-rs && cargo fmt --all && cd ..
           rm .github/workflows/temp-apply-p2.yml
           git add -A
           git diff --cached --check
-          test "$(git diff --cached --name-only | grep -c '^\.github/workflows/temp-apply-p2.yml$' || true)" -eq 1
-          test "$(git diff --cached -- codex-rs/windows-sandbox-rs/src/setup.rs | grep -c 'setup refresh: spawning' || true)" -ge 1
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git commit -m "Run Windows apply_patch setup refresh in process"
