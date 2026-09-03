@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Instant;
 use windows_sys::Win32::NetworkManagement::NetManagement::UF_ACCOUNTDISABLE;
 
 #[derive(Debug, Clone)]
@@ -260,7 +261,8 @@ pub fn require_logon_sandbox_creds(
         identity = select_identity(network_identity, codex_home)?;
     }
     // Always refresh ACLs (non-elevated) for current roots via the setup binary.
-    run_setup_refresh_with_overrides_and_proxy_settings(
+    let refresh_started_at = Instant::now();
+    let refresh_result = run_setup_refresh_with_overrides_and_proxy_settings(
         crate::setup::SandboxSetupRequest {
             permissions,
             command_cwd,
@@ -276,7 +278,16 @@ pub fn require_logon_sandbox_creds(
             deny_write_paths: Some(deny_write_paths_override.to_vec()),
         },
         &desired_offline_proxy_settings,
-    )?;
+    );
+    crate::logging::log_note(
+        &format!(
+            "setup refresh: completed success={} elapsed_ms={:.3}",
+            refresh_result.is_ok(),
+            refresh_started_at.elapsed().as_secs_f64() * 1000.0
+        ),
+        Some(&sandbox_dir),
+    );
+    refresh_result?;
     let identity = identity.ok_or_else(|| {
         anyhow!(
             "Windows sandbox setup is missing or out of date; rerun the sandbox setup with elevation"
