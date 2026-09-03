@@ -97,33 +97,33 @@ use sandbox_users::resolve_sandbox_users_group_sid;
 use sandbox_users::sid_bytes_to_psid;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct Payload {
-    version: u32,
-    offline_username: String,
-    online_username: String,
-    codex_home: PathBuf,
-    command_cwd: PathBuf,
-    read_roots: Vec<PathBuf>,
-    write_roots: Vec<PathBuf>,
+pub(crate) struct Payload {
+    pub(crate) version: u32,
+    pub(crate) offline_username: String,
+    pub(crate) online_username: String,
+    pub(crate) codex_home: PathBuf,
+    pub(crate) command_cwd: PathBuf,
+    pub(crate) read_roots: Vec<PathBuf>,
+    pub(crate) write_roots: Vec<PathBuf>,
     #[serde(default)]
-    deny_read_paths: Vec<PathBuf>,
+    pub(crate) deny_read_paths: Vec<PathBuf>,
     #[serde(default)]
-    deny_write_paths: Vec<PathBuf>,
-    proxy_ports: Vec<u16>,
+    pub(crate) deny_write_paths: Vec<PathBuf>,
+    pub(crate) proxy_ports: Vec<u16>,
     #[serde(default)]
-    allow_local_binding: bool,
+    pub(crate) allow_local_binding: bool,
     #[serde(default)]
-    otel: Option<StatsigMetricsSettings>,
-    real_user: String,
+    pub(crate) otel: Option<StatsigMetricsSettings>,
+    pub(crate) real_user: String,
     #[serde(default)]
-    mode: SetupMode,
+    pub(crate) mode: SetupMode,
     #[serde(default)]
-    refresh_only: bool,
+    pub(crate) refresh_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
-enum SetupMode {
+pub(crate) enum SetupMode {
     #[default]
     Full,
     InteractiveProvision,
@@ -190,7 +190,7 @@ fn spawn_read_acl_helper(payload: &Payload, _log: &mut dyn Write) -> Result<()> 
     read_payload.refresh_only = true;
     let payload_json = serde_json::to_vec(&read_payload)?;
     let payload_b64 = BASE64.encode(payload_json);
-    let exe = std::env::current_exe().context("locate setup helper")?;
+    let exe = crate::setup::find_setup_exe();
     Command::new(&exe)
         .arg(payload_b64)
         .stdin(Stdio::null())
@@ -516,6 +516,10 @@ fn real_main(setup_mode: &mut Option<SetupMode>) -> Result<()> {
             ),
         )));
     }
+    run_payload(&payload)
+}
+
+pub(crate) fn run_payload(payload: &Payload) -> Result<()> {
     let sbx_dir = sandbox_dir(&payload.codex_home);
     std::fs::create_dir_all(&sbx_dir).map_err(|err| {
         anyhow::Error::new(SetupFailure::new(
@@ -640,11 +644,6 @@ fn run_read_acl_only(payload: &Payload, log: &mut dyn Write) -> Result<()> {
             if !everyone_psid.is_null() {
                 LocalFree(everyone_psid as HLOCAL);
             }
-        }
-    }
-    unsafe {
-        if !sandbox_group_psid.is_null() {
-            LocalFree(sandbox_group_psid as HLOCAL);
         }
     }
     if !refresh_errors.is_empty() {
@@ -865,6 +864,17 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
             format!("convert sandbox users group SID to PSID failed: {err}"),
         ))
     })?;
+    struct SandboxGroupPsidGuard(*mut c_void);
+    impl Drop for SandboxGroupPsidGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if !self.0.is_null() {
+                    LocalFree(self.0 as HLOCAL);
+                }
+            }
+        }
+    }
+    let _sandbox_group_psid_guard = SandboxGroupPsidGuard(sandbox_group_psid);
     let sandbox_group_sid_str =
         string_from_sid_bytes(&sandbox_group_sid).map_err(anyhow::Error::msg)?;
 
@@ -1117,7 +1127,7 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
 }
 
 #[cfg(test)]
-#[path = "win_acl_tests.rs"]
+#[path = "setup_impl_acl_tests.rs"]
 mod acl_tests;
 
 #[cfg(test)]
