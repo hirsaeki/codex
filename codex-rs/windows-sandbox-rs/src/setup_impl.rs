@@ -646,6 +646,11 @@ fn run_read_acl_only(payload: &Payload, log: &mut dyn Write) -> Result<()> {
             }
         }
     }
+    unsafe {
+        if !sandbox_group_psid.is_null() {
+            LocalFree(sandbox_group_psid as HLOCAL);
+        }
+    }
     if !refresh_errors.is_empty() {
         log_line(
             log,
