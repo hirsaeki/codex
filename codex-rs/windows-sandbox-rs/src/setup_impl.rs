@@ -1115,11 +1115,6 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
         lock_persistent_sandbox_dirs(payload, &sandbox_group_sid)?;
     }
 
-    unsafe {
-        if !sandbox_group_psid.is_null() {
-            LocalFree(sandbox_group_psid as HLOCAL);
-        }
-    }
     if refresh_only && !refresh_errors.is_empty() {
         log_line(
             log,
