@@ -1,0 +1,29 @@
+name: verify-p2-in-process
+
+on:
+  push:
+    branches:
+      - verify/p2-in-process-main-20260904
+    paths:
+      - .github/workflows/verify-p2-in-process.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - name: Run Windows apply_patch P1R+P2 regression
+        shell: pwsh
+        run: |
+          $env:CODEX_HOME = Join-Path $env:RUNNER_TEMP 'codex-p2-home'
+          New-Item -ItemType Directory -Force -Path $env:CODEX_HOME | Out-Null
+          Set-Location codex-rs
+          cargo test -p codex-core --test windows_apply_patch_fs_helper_reuse -- --nocapture
