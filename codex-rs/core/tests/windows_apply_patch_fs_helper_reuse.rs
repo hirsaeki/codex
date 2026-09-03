@@ -114,6 +114,23 @@ async fn run_test() -> Result<()> {
         helper_starts == 1,
         "expected exactly one filesystem helper for one apply_patch, got {helper_starts}"
     );
+    let operation_log = log.lines().skip(log_line_count).collect::<Vec<_>>();
+    let setup_refreshes = operation_log
+        .iter()
+        .filter(|line| line.contains("setup refresh: running in-process"))
+        .count();
+    let refresh_child_spawns = operation_log
+        .iter()
+        .filter(|line| line.contains("setup refresh: spawning "))
+        .count();
+    anyhow::ensure!(
+        setup_refreshes == 1,
+        "expected exactly one in-process sandbox setup refresh, got {setup_refreshes}"
+    );
+    anyhow::ensure!(
+        refresh_child_spawns == 0,
+        "expected no refresh-only setup child process, got {refresh_child_spawns}"
+    );
 
     Ok(())
 }
